@@ -77,44 +77,51 @@ export class WhisperCLI {
     const srtOutputPath = `${outputBaseName}.srt`;
     const txtOutputPath = `${outputBaseName}.txt`;
 
-    // Build whisper command arguments
+    // Build whisper command arguments to match your working format
     const args = [
       '-m', this.modelPath,
       '-f', audioPath,
       '-of', outputBaseName,
-      '--output-json',
-      '--output-srt',
-      '--output-txt',
-      '--print-progress',
-      '--print-special',
-      '--language', config.language || 'auto',
+      '-l', config.language || 'auto',
+      '-pp',  // print progress
+      '-pc',  // print colors
+      '-otxt', // output txt
+      '-osrt', // output srt
     ];
 
     // Add word timestamps if enabled
     if (config.wordTimestamps) {
-      args.push('--word-timestamps');
+      args.push('-ml', '1'); // max line length for word timestamps
     }
 
     try {
+      console.log('Executing whisper command:');
+      console.log(`${this.executablePath} ${args.join(' ')}`);
+      
       const result = await this.runWhisperCommand(args, onProgress);
       
       if (result.exitCode !== 0) {
-        throw new Error(`Whisper transcription failed: ${result.stderr}`);
+        console.error('Whisper command failed:');
+        console.error('Exit code:', result.exitCode);
+        console.error('STDERR:', result.stderr);
+        console.error('STDOUT:', result.stdout.substring(0, 1000) + '...');
+        throw new Error(`Whisper transcription failed with exit code ${result.exitCode}: ${result.stderr}`);
       }
 
-      // Parse the JSON output
+      // Parse the output - prioritize text file since we're using whisper-cli
       let transcriptionResult: TranscriptionResult;
       
-      if (existsSync(jsonOutputPath)) {
+      if (existsSync(txtOutputPath)) {
+        const textContent = await fs.readFile(txtOutputPath, 'utf-8');
+        console.log('Transcription text content:', textContent.substring(0, 200) + '...');
+        transcriptionResult = parseWhisperOutput(textContent);
+      } else if (existsSync(jsonOutputPath)) {
         const jsonContent = await fs.readFile(jsonOutputPath, 'utf-8');
         transcriptionResult = parseWhisperOutput(jsonContent);
       } else {
-        // Fallback to text output if JSON is not available
-        const textContent = existsSync(txtOutputPath) 
-          ? await fs.readFile(txtOutputPath, 'utf-8')
-          : result.stdout;
-        
-        transcriptionResult = parseWhisperOutput(textContent);
+        // Fallback to stdout if no files are generated
+        console.log('No output files found, using stdout:', result.stdout.substring(0, 200) + '...');
+        transcriptionResult = parseWhisperOutput(result.stdout);
       }
 
       // Ensure we have the correct model information
@@ -212,11 +219,11 @@ export class WhisperCLI {
         reject(error);
       });
       
-      // Set timeout to prevent hanging
+      // Set timeout to prevent hanging - increased for large-v3 model
       const timeout = setTimeout(() => {
         process.kill('SIGTERM');
         reject(new Error('Whisper process timed out'));
-      }, 30 * 60 * 1000); // 30 minutes timeout
+      }, 60 * 60 * 1000); // 60 minutes timeout for large models
       
       process.on('close', () => {
         clearTimeout(timeout);

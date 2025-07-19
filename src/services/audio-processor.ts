@@ -1,7 +1,7 @@
 import ffmpeg from 'fluent-ffmpeg';
 import ffmpegStatic from 'ffmpeg-static';
 import { promises as fs } from 'fs';
-import { existsSync } from 'fs';
+import { existsSync, statSync } from 'fs';
 import path from 'path';
 import { AudioFileInfo } from '../types/audio.js';
 
@@ -233,7 +233,7 @@ export class AudioProcessor {
           return;
         }
 
-        const stats = require('fs').statSync(filePath);
+        const stats = statSync(filePath);
 
         resolve({
           path: filePath,
