@@ -11,6 +11,10 @@ import { queueConfig } from '../utils/queue-config.js';
 class SSEConnectionManager {
   private connections: Map<string, Response> = new Map();
   private taskSubscriptions: Map<string, Set<string>> = new Map();
+  private eventBuffer: Map<string, any[]> = new Map(); // Buffer events for rapid updates
+  private lastEventTime: Map<string, number> = new Map();
+  private readonly BUFFER_WINDOW_MS = 100; // Buffer events for 100ms
+  private readonly MAX_BUFFER_SIZE = 50;
 
   /**
    * Add SSE connection
@@ -38,6 +42,9 @@ class SSEConnectionManager {
       subscribers.delete(connectionId);
       if (subscribers.size === 0) {
         this.taskSubscriptions.delete(taskId);
+        // Clean up buffers for tasks with no subscribers
+        this.eventBuffer.delete(taskId);
+        this.lastEventTime.delete(taskId);
       }
     }
 
@@ -91,9 +98,58 @@ class SSEConnectionManager {
     const subscribers = this.taskSubscriptions.get(taskId);
     if (!subscribers) return;
 
+    // Send all events immediately for real-time display
     for (const connectionId of subscribers) {
       this.sendMessage(connectionId, message);
     }
+  }
+
+  /**
+   * Buffer text stream events to reduce rapid updates
+   */
+  private bufferTextStreamEvent(taskId: string, message: any): void {
+    const now = Date.now();
+    const lastEventTime = this.lastEventTime.get(taskId) || 0;
+    
+    // Initialize buffer if needed
+    if (!this.eventBuffer.has(taskId)) {
+      this.eventBuffer.set(taskId, []);
+    }
+    
+    const buffer = this.eventBuffer.get(taskId)!;
+    buffer.push(message);
+    
+    // Limit buffer size
+    if (buffer.length > this.MAX_BUFFER_SIZE) {
+      buffer.shift(); // Remove oldest event
+    }
+    
+    // If enough time has passed or buffer is getting full, flush it
+    if (now - lastEventTime > this.BUFFER_WINDOW_MS || buffer.length >= this.MAX_BUFFER_SIZE) {
+      this.flushTextStreamBuffer(taskId);
+    }
+  }
+
+  /**
+   * Flush buffered text stream events
+   */
+  private flushTextStreamBuffer(taskId: string): void {
+    const buffer = this.eventBuffer.get(taskId);
+    if (!buffer || buffer.length === 0) return;
+    
+    const subscribers = this.taskSubscriptions.get(taskId);
+    if (!subscribers) return;
+    
+    // Send all buffered events
+    for (const connectionId of subscribers) {
+      for (const message of buffer) {
+        this.sendMessage(connectionId, message);
+      }
+    }
+    
+    // Clear buffer and update last event time
+    this.eventBuffer.set(taskId, []);
+    this.lastEventTime.set(taskId, Date.now());
   }
 
   /**
@@ -151,6 +207,15 @@ class SSEConnectionManager {
       taskSubscriptions,
     };
   }
+
+  /**
+   * Flush all pending text stream buffers
+   */
+  flushAllBuffers(): void {
+    for (const taskId of this.eventBuffer.keys()) {
+      this.flushTextStreamBuffer(taskId);
+    }
+  }
 }
 
 // Global SSE connection manager
@@ -160,6 +225,11 @@ const sseManager = new SSEConnectionManager();
 setInterval(() => {
   sseManager.sendHeartbeat();
 }, 30000); // Every 30 seconds
+
+// Start buffer flush interval
+setInterval(() => {
+  sseManager.flushAllBuffers();
+}, 500); // Flush buffers every 500ms
 
 /**
  * Events router for SSE management
@@ -335,7 +405,7 @@ export function createTaskSSEHandler() {
  * Function to broadcast task updates (to be called from workers)
  */
 export function broadcastTaskUpdate(taskId: string, update: {
-  type: 'progress' | 'status' | 'error' | 'complete';
+  type: 'progress' | 'status' | 'error' | 'complete' | 'text-stream';
   data: any;
 }): void {
   sseManager.broadcastToTask(taskId, {

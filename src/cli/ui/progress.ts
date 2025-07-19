@@ -5,6 +5,7 @@ import { SSEClient, createTaskSSEClient } from '../utils/sse-client.js';
 import { CLITRPCClient } from '../client.js';
 import { TaskStatus } from '../../types/task.js';
 import { formatDuration, formatTimestamp, colors } from '../utils/formatters.js';
+import { TranscriptionDisplay, createTranscriptionDisplay } from './transcription-display.js';
 
 /**
  * Processing stage definitions
@@ -88,6 +89,12 @@ export class TaskProgressMonitor {
   private isActive = false;
   private currentStage: string = '';
   private taskStatus: TaskStatus = 'pending';
+  private transcriptionDisplay: TranscriptionDisplay | null = null;
+  private isStuckProgressDetected = false;
+  private lastProgressUpdate = Date.now();
+  private currentTranscriptionText = '';
+  private lastTranscriptionUpdate = Date.now();
+  private queuePollingInterval: NodeJS.Timeout | null = null;
 
   constructor(taskId: string, client: CLITRPCClient, config?: Partial<ProgressConfig>) {
     this.taskId = taskId;
@@ -129,19 +136,7 @@ export class TaskProgressMonitor {
    * Stop monitoring and cleanup
    */
   stop(): void {
-    this.isActive = false;
-
-    if (this.sseClient) {
-      this.sseClient.disconnect();
-      this.sseClient = null;
-    }
-
-    if (this.multibar) {
-      this.multibar.stop();
-      this.multibar = null;
-    }
-
-    this.progressBars.clear();
+    this.cleanupAndStop();
   }
 
   /**
@@ -181,10 +176,13 @@ export class TaskProgressMonitor {
   private async setupSSEClient(): Promise<void> {
     this.sseClient = createTaskSSEClient(this.taskId);
 
-    this.sseClient.on('connected', () => {
+    this.sseClient.on('connected', async () => {
       if (this.config.enableAnimations) {
         console.log(`${logSymbols.success} ${colors.success('Connected to real-time updates')}`);
       }
+      
+      // Immediately sync with current task status when connected
+      await this.updateTaskStatus();
     });
 
     this.sseClient.on('progress', (data) => {
@@ -203,6 +201,10 @@ export class TaskProgressMonitor {
       this.handleSSEError(error);
     });
 
+    this.sseClient.on('text-stream', (data) => {
+      this.handleTextStreamUpdate(data);
+    });
+
     this.sseClient.on('reconnecting', (attempt, delay) => {
       if (this.config.enableAnimations) {
         console.log(`${colors.warning('⚠')} Reconnecting to server (attempt ${attempt})...`);
@@ -216,20 +218,31 @@ export class TaskProgressMonitor {
   private handleProgressUpdate(data: any): void {
     if (!this.isActive) return;
 
-    const { stage, progress, eta } = data.data || data;
+    const { stage, progress, eta, step } = data.data || data;
+    this.lastProgressUpdate = Date.now();
+    this.isStuckProgressDetected = false;
 
     if (stage && typeof stage === 'string' && this.progressBars.has(stage)) {
       const bar = this.progressBars.get(stage)!;
       bar.update(Math.min(100, Math.max(0, progress)), {
         eta: eta ? formatDuration(eta) : '--',
         speed: this.calculateSpeed(progress),
+        step: step || '',
       });
+    }
+
+    // Initialize simple transcription display when transcribing starts
+    if (stage === 'transcribing') {
+      // Simple mode - we handle transcription in handleTextStreamUpdate
     }
 
     // Update compact mode display
     if (!this.multibar && this.config.compact && stage) {
-      this.displayCompactProgress(stage, progress);
+      this.displayCompactProgress(stage, progress, step);
     }
+
+    // Detect stuck progress
+    this.detectStuckProgress(stage, progress);
   }
 
   /**
@@ -244,6 +257,11 @@ export class TaskProgressMonitor {
 
     // Update active stage highlighting
     this.updateStageHighlighting();
+
+    // Update stage progress based on status
+    if (manifest.status && manifest.progress !== undefined) {
+      this.updateStageProgress(manifest.status, manifest.progress);
+    }
 
     if (this.config.enableAnimations) {
       this.displayStatusChange(manifest.status, manifest.currentStep);
@@ -263,11 +281,156 @@ export class TaskProgressMonitor {
     // Complete all progress bars
     this.progressBars.forEach(bar => bar.update(100));
 
-    // Stop progress monitoring
+    // Display any remaining transcription text
+    if (this.currentTranscriptionText.trim()) {
+      this.displayCurrentTranscription();
+    }
+
+    // Stop transcription display
+    if (this.transcriptionDisplay) {
+      this.transcriptionDisplay.stop();
+      this.transcriptionDisplay = null;
+    }
+
+    // Stop progress monitoring with proper cleanup
     setTimeout(() => {
-      this.stop();
+      this.cleanupAndStop();
       this.displayCompletionSummary(result, totalDuration);
-    }, 1000);
+    }, 1500); // Give more time for final updates
+  }
+
+  /**
+   * Handle text stream updates for transcription
+   */
+  private handleTextStreamUpdate(data: any): void {
+    if (!this.isActive) return;
+
+    const segment = data.data || data;
+    if (segment && segment.text && segment.text.trim()) {
+      const now = Date.now();
+      const cleanText = segment.text.trim();
+      
+      // Accumulate text with space if needed
+      if (this.currentTranscriptionText && !this.currentTranscriptionText.endsWith(' ') && !cleanText.startsWith(' ')) {
+        this.currentTranscriptionText += ' ';
+      }
+      this.currentTranscriptionText += cleanText;
+      
+      // Show updates when we have enough text or after time delay
+      if (now - this.lastTranscriptionUpdate > 1000 || 
+          this.currentTranscriptionText.length > 20 ||
+          cleanText.includes('。') || cleanText.includes('？') || cleanText.includes('！') || 
+          cleanText.includes('.') || cleanText.includes('?') || cleanText.includes('!')) {
+        this.displayCurrentTranscription();
+        this.lastTranscriptionUpdate = now;
+      }
+    }
+  }
+
+  /**
+   * Display current transcription text in a clean format
+   */
+  private displayCurrentTranscription(): void {
+    if (this.currentTranscriptionText.trim()) {
+      // Clear previous line and show new transcription
+      process.stdout.write('\r\x1b[K'); // Clear current line
+      process.stdout.write(`📝 ${colors.dim('正在转录:')} ${colors.primary(this.currentTranscriptionText)}\n`);
+      
+      // Reset text buffer after displaying
+      this.currentTranscriptionText = '';
+    }
+  }
+
+  /**
+   * Initialize transcription display
+   */
+  private async initializeTranscriptionDisplay(): Promise<void> {
+    try {
+      if (!this.transcriptionDisplay) {
+        this.transcriptionDisplay = await createTranscriptionDisplay(
+          this.taskId,
+          this.client,
+          {
+            maxVisibleLines: 4,
+            showTimestamps: true,
+            enableExpandCollapse: true,
+            autoExpand: false,
+          }
+        );
+      }
+    } catch (error) {
+      console.warn('Failed to initialize transcription display:', error);
+    }
+  }
+
+  /**
+   * Detect stuck progress and provide recovery
+   */
+  private detectStuckProgress(stage: string, progress: number): void {
+    const now = Date.now();
+    const timeSinceLastUpdate = now - this.lastProgressUpdate;
+    
+    // Consider progress stuck if no updates for 30 seconds during active stages
+    if (timeSinceLastUpdate > 30000 && ['transcribing', 'summarizing'].includes(stage)) {
+      if (!this.isStuckProgressDetected) {
+        this.isStuckProgressDetected = true;
+        console.log(`${colors.warning('⚠')} Progress appears stuck at ${progress}% - this is normal for large files`);
+        
+        // Attempt recovery by polling task status
+        this.attemptProgressRecovery();
+      }
+    }
+  }
+
+  /**
+   * Attempt to recover from stuck progress
+   */
+  private async attemptProgressRecovery(): Promise<void> {
+    try {
+      await this.updateTaskStatus();
+      console.log(`${colors.info('ℹ')} Refreshed task status`);
+    } catch (error) {
+      console.warn('Failed to recover progress status:', error);
+    }
+  }
+
+  /**
+   * Enhanced cleanup and stop
+   */
+  private cleanupAndStop(): void {
+    this.isActive = false;
+
+    // Stop transcription display
+    if (this.transcriptionDisplay) {
+      this.transcriptionDisplay.stop();
+      this.transcriptionDisplay = null;
+    }
+
+    // Clear queue polling
+    if (this.queuePollingInterval) {
+      clearInterval(this.queuePollingInterval);
+      this.queuePollingInterval = null;
+    }
+
+    // Disconnect SSE client
+    if (this.sseClient) {
+      this.sseClient.disconnect();
+      this.sseClient = null;
+    }
+
+    // Stop and clear progress bars properly
+    if (this.multibar) {
+      try {
+        this.multibar.stop();
+        // Clear any remaining display artifacts
+        process.stdout.write('\n');
+      } catch (error) {
+        // Ignore cleanup errors
+      }
+      this.multibar = null;
+    }
+
+    this.progressBars.clear();
   }
 
   /**
@@ -279,10 +442,22 @@ export class TaskProgressMonitor {
       this.taskStatus = status.status as TaskStatus;
       this.currentStage = status.currentStep;
 
-      // Initial progress update
-      this.updateStageProgress(status.status as TaskStatus, status.progress);
+      // Show queue status if task is still pending
+      if (status.status === 'pending') {
+        if (this.config.enableAnimations) {
+          this.displayStatusChange('pending', 'Waiting in queue for processing to begin...');
+        }
+        // Start polling for when task begins
+        this.startQueuePolling();
+      } else {
+        // Initial progress update for active tasks
+        this.updateStageProgress(status.status as TaskStatus, status.progress);
+      }
     } catch (error) {
-      console.warn(colors.warning('Failed to get initial task status'));
+      // Silently fail for polling fallback - don't spam the console
+      if (this.config.enableAnimations) {
+        console.warn(colors.warning('Failed to get initial task status'));
+      }
     }
   }
 
@@ -326,11 +501,12 @@ export class TaskProgressMonitor {
   /**
    * Display compact progress (for non-TTY environments)
    */
-  private displayCompactProgress(stage: string, progress: number): void {
+  private displayCompactProgress(stage: string, progress: number, step?: string): void {
     
     const percentage = Math.round(progress);
     const stageName = PROCESSING_STAGES.find(s => s.id === stage)?.name || stage;
-    console.log(`${colors.primary('▶')} ${stageName}: ${colors.secondary(`${percentage}%`)}`);
+    const stepText = step ? ` - ${colors.dim(step)}` : '';
+    console.log(`${colors.primary('▶')} ${stageName}: ${colors.secondary(`${percentage}%`)}${stepText}`);
   }
 
   /**
@@ -441,8 +617,10 @@ export class TaskProgressMonitor {
    * Handle SSE errors
    */
   private handleSSEError(error: any): void {
-    if (this.config.enableAnimations) {
+    // Only show message once
+    if (this.config.enableAnimations && !this.isStuckProgressDetected) {
       console.log(`${colors.warning('⚠')} Real-time updates unavailable, falling back to polling...`);
+      this.isStuckProgressDetected = true; // Reuse this flag to prevent spam
     }
     
     // Fallback to polling
@@ -464,7 +642,39 @@ export class TaskProgressMonitor {
       } catch (error) {
         // Ignore polling errors
       }
-    }, 3000); // Poll every 3 seconds
+    }, 5000); // Poll every 5 seconds
+  }
+
+  /**
+   * Start queue polling for pending tasks
+   */
+  private startQueuePolling(): void {
+    if (this.queuePollingInterval) return; // Already polling
+
+    this.queuePollingInterval = setInterval(async () => {
+      if (!this.isActive) {
+        if (this.queuePollingInterval) {
+          clearInterval(this.queuePollingInterval);
+          this.queuePollingInterval = null;
+        }
+        return;
+      }
+
+      try {
+        const status = await this.client.tasks.getStatus.query({ taskId: this.taskId });
+        if (status.status !== 'pending') {
+          // Task has started, stop queue polling
+          if (this.queuePollingInterval) {
+            clearInterval(this.queuePollingInterval);
+            this.queuePollingInterval = null;
+          }
+          // Trigger status update
+          this.handleStatusUpdate({ data: status });
+        }
+      } catch (error) {
+        // Ignore polling errors
+      }
+    }, 2000); // Poll every 2 seconds for queue status
   }
 }
 

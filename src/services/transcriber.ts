@@ -12,6 +12,15 @@ export interface TranscriptionOptions {
   outputDir: string;
   config: AudioConfig;
   onProgress?: (progress: number) => void;
+  onTextStream?: (segment: {
+    type: 'segment-start' | 'segment-text' | 'segment-complete';
+    segmentId: number;
+    text: string;
+    startTime: number;
+    endTime?: number;
+    confidence?: number;
+    isPartial: boolean;
+  }) => void;
 }
 
 /**
@@ -56,7 +65,7 @@ export class Transcriber {
    * Transcribe audio file using whisper.cpp
    */
   async transcribeAudio(options: TranscriptionOptions): Promise<TranscriptionResult> {
-    const { audioPath, outputDir, config, onProgress } = options;
+    const { audioPath, outputDir, config, onProgress, onTextStream } = options;
 
     // Validate input file
     if (!existsSync(audioPath)) {
@@ -79,7 +88,8 @@ export class Transcriber {
         audioPath,
         outputDir,
         config,
-        onProgress
+        onProgress,
+        onTextStream
       );
 
       // Save transcription results

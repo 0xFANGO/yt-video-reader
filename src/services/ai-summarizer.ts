@@ -68,7 +68,10 @@ export class AISummarizer {
   /**
    * Generate AI summary from transcription
    */
-  async generateSummary(options: SummaryOptions): Promise<SummaryResult> {
+  async generateSummary(
+    options: SummaryOptions,
+    onProgress?: (progress: number, step: string) => void
+  ): Promise<SummaryResult> {
     const { transcription, outputDir, language = 'English', style = 'concise', includeTimestamps = true } = options;
 
     // Validate transcription
@@ -86,6 +89,7 @@ export class AISummarizer {
       const formattedTranscript = this.formatTranscript(transcription, includeTimestamps);
       
       // Generate summary using OpenAI
+      onProgress?.(85, 'Calling OpenAI API...');
       const summaryResult = await this.callOpenAI(formattedTranscript, {
         language,
         style,
@@ -95,6 +99,9 @@ export class AISummarizer {
       // Calculate processing time
       const processingTime = Date.now() - startTime;
 
+      // Process and validate response
+      onProgress?.(90, 'Processing response...');
+      
       // Create final result
       const result: SummaryResult = {
         ...summaryResult,
@@ -108,8 +115,10 @@ export class AISummarizer {
       };
 
       // Save summary to file
+      onProgress?.(95, 'Saving summary files...');
       await this.saveSummary(result, outputDir);
 
+      onProgress?.(100, 'Summary completed');
       return result;
     } catch (error) {
       if (error instanceof SummaryError) {

@@ -16,9 +16,9 @@ export interface SSEClientConfig {
  */
 const DEFAULT_SSE_CONFIG: SSEClientConfig = {
   baseUrl: 'http://localhost:3000',
-  reconnectInterval: 3000, // 3 seconds
-  maxReconnectAttempts: 10,
-  timeout: 30000, // 30 seconds
+  reconnectInterval: 5000, // 5 seconds
+  maxReconnectAttempts: 5, // Reduced attempts
+  timeout: 15000, // 15 seconds timeout
 };
 
 /**
@@ -347,6 +347,7 @@ export interface SSEClientEvents {
   progress: (data: any) => void;
   status: (data: any) => void;
   complete: (data: any) => void;
+  'text-stream': (data: any) => void;
   'event-type': (eventType: string) => void;
   'state-change': (newState: SSEConnectionState, oldState: SSEConnectionState) => void;
   reconnecting: (attempt: number, delay: number) => void;

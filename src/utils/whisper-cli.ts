@@ -1,4 +1,4 @@
-import { spawn, ChildProcess } from 'child_process';
+import { spawn } from 'child_process';
 import { AudioConfig, TranscriptionResult, parseWhisperOutput } from '../types/audio.js';
 import { promises as fs } from 'fs';
 import { existsSync } from 'fs';
@@ -60,7 +60,16 @@ export class WhisperCLI {
     audioPath: string,
     outputDir: string,
     config: AudioConfig,
-    onProgress?: (progress: number) => void
+    onProgress?: (progress: number) => void,
+    onTextStream?: (segment: {
+      type: 'segment-start' | 'segment-text' | 'segment-complete';
+      segmentId: number;
+      text: string;
+      startTime: number;
+      endTime?: number;
+      confidence?: number;
+      isPartial: boolean;
+    }) => void
   ): Promise<TranscriptionResult> {
     // Validate inputs
     if (!existsSync(audioPath)) {
@@ -74,7 +83,7 @@ export class WhisperCLI {
     // Prepare output files
     const outputBaseName = path.join(outputDir, 'transcription');
     const jsonOutputPath = `${outputBaseName}.json`;
-    const srtOutputPath = `${outputBaseName}.srt`;
+    // const srtOutputPath = `${outputBaseName}.srt`; // Future use
     const txtOutputPath = `${outputBaseName}.txt`;
 
     // Build whisper command arguments to match your working format
@@ -98,7 +107,7 @@ export class WhisperCLI {
       console.log('Executing whisper command:');
       console.log(`${this.executablePath} ${args.join(' ')}`);
       
-      const result = await this.runWhisperCommand(args, onProgress);
+      const result = await this.runWhisperCommand(args, onProgress, onTextStream);
       
       if (result.exitCode !== 0) {
         console.error('Whisper command failed:');
@@ -167,7 +176,16 @@ export class WhisperCLI {
    */
   private async runWhisperCommand(
     args: string[],
-    onProgress?: (progress: number) => void
+    onProgress?: (progress: number) => void,
+    onTextStream?: (segment: {
+      type: 'segment-start' | 'segment-text' | 'segment-complete';
+      segmentId: number;
+      text: string;
+      startTime: number;
+      endTime?: number;
+      confidence?: number;
+      isPartial: boolean;
+    }) => void
   ): Promise<{
     exitCode: number;
     stdout: string;
@@ -178,10 +196,14 @@ export class WhisperCLI {
       
       let stdout = '';
       let stderr = '';
+      // const currentSegmentId = 0; // Future use
+      // const segmentBuffer = ''; // Future use
       
       process.stdout.on('data', (data) => {
         const chunk = data.toString();
         stdout += chunk;
+        
+        // Note: Raw whisper output can be logged here for debugging if needed
         
         // Parse progress from stdout
         if (onProgress) {
@@ -190,6 +212,11 @@ export class WhisperCLI {
             const progress = parseInt(progressMatch[1]);
             onProgress(progress);
           }
+        }
+
+        // Parse real-time transcription text from stdout
+        if (onTextStream) {
+          this.parseTextStreamFromOutput(chunk, 0, onTextStream);
         }
       });
       
@@ -289,6 +316,181 @@ export class WhisperCLI {
       console.error('Whisper transcription test failed:', error);
       return false;
     }
+  }
+
+  /**
+   * Parse real-time text stream from whisper output
+   */
+  private parseTextStreamFromOutput(
+    chunk: string,
+    segmentId: number,
+    onTextStream: (segment: {
+      type: 'segment-start' | 'segment-text' | 'segment-complete';
+      segmentId: number;
+      text: string;
+      startTime: number;
+      endTime?: number;
+      confidence?: number;
+      isPartial: boolean;
+    }) => void
+  ): void {
+    try {
+      const lines = chunk.split('\n');
+      let currentSegmentId = segmentId;
+      
+      for (const line of lines) {
+        const trimmedLine = line.trim();
+        if (!trimmedLine) continue;
+
+        // Pattern 1: Direct SRT-style timestamp format [00:01.200 --> 00:03.400]  Hello world
+        const srtTimestampPattern = /\[(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(\d{2}):(\d{2})\.(\d{3})\]\s*(.+)/;
+        const srtMatch = srtTimestampPattern.exec(trimmedLine);
+        
+        if (srtMatch) {
+          const startTime = this.parseTimestamp(srtMatch[1]!, srtMatch[2]!, srtMatch[3]!);
+          const endTime = this.parseTimestamp(srtMatch[4]!, srtMatch[5]!, srtMatch[6]!);
+          const text = srtMatch[7]?.trim();
+          
+          if (text && text.length > 0) {
+            // Clean text of ANSI color codes
+            const cleanText = this.cleanText(text);
+            
+            onTextStream({
+              type: 'segment-start',
+              segmentId: currentSegmentId,
+              text: '',
+              startTime,
+              endTime,
+              isPartial: false,
+            });
+
+            onTextStream({
+              type: 'segment-text',
+              segmentId: currentSegmentId,
+              text: cleanText,
+              startTime,
+              endTime,
+              isPartial: false,
+            });
+
+            onTextStream({
+              type: 'segment-complete',
+              segmentId: currentSegmentId,
+              text: cleanText,
+              startTime,
+              endTime,
+              isPartial: false,
+            });
+            
+            currentSegmentId++;
+          }
+          continue;
+        }
+
+        // Pattern 2: Whisper progress with partial text like "[00:00:01.200 --> 00:00:03.400]  Hello"
+        const whisperProgressPattern = /\[(\d{2}):(\d{2}):(\d{2})\.(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2})\.(\d{3})\]\s*(.+)/;
+        const progressMatch = whisperProgressPattern.exec(trimmedLine);
+        
+        if (progressMatch) {
+          const startMins = parseInt(progressMatch[1]!) * 60 + parseInt(progressMatch[2]!);
+          const startTime = startMins + parseInt(progressMatch[3]!) + parseInt(progressMatch[4]!) / 1000;
+          
+          const endMins = parseInt(progressMatch[5]!) * 60 + parseInt(progressMatch[6]!);
+          const endTime = endMins + parseInt(progressMatch[7]!) + parseInt(progressMatch[8]!) / 1000;
+          
+          const text = progressMatch[9]?.trim();
+          
+          if (text && text.length > 0) {
+            const cleanText = this.cleanText(text);
+            
+            onTextStream({
+              type: 'segment-text',
+              segmentId: currentSegmentId,
+              text: cleanText,
+              startTime,
+              endTime,
+              isPartial: false,
+            });
+            currentSegmentId++;
+          }
+          continue;
+        }
+
+        // Pattern 3: Simple timestamp at start "[00:01.200]" followed by text
+        const simpleTimestampPattern = /\[(\d{2}):(\d{2})\.(\d{3})\]\s*(.+)/;
+        const simpleMatch = simpleTimestampPattern.exec(trimmedLine);
+        
+        if (simpleMatch) {
+          const startTime = this.parseTimestamp(simpleMatch[1]!, simpleMatch[2]!, simpleMatch[3]!);
+          const text = simpleMatch[4]?.trim();
+          
+          if (text && text.length > 0) {
+            const cleanText = this.cleanText(text);
+            
+            onTextStream({
+              type: 'segment-text',
+              segmentId: currentSegmentId,
+              text: cleanText,
+              startTime,
+              isPartial: true,
+            });
+            currentSegmentId++;
+          }
+          continue;
+        }
+
+        // Pattern 4: Look for standalone transcribed text without timestamps
+        // Only consider lines that look like actual speech (not technical output)
+        if (!trimmedLine.includes('whisper') &&
+            !trimmedLine.includes('progress') &&
+            !trimmedLine.includes('%') &&
+            !trimmedLine.includes('model') &&
+            !trimmedLine.includes('sampling') &&
+            !trimmedLine.toLowerCase().includes('load') &&
+            !trimmedLine.includes('system') &&
+            trimmedLine.length > 2 &&
+            /[a-zA-Z]/.test(trimmedLine)) {
+          
+          // This looks like actual transcribed text
+          const cleanText = this.cleanText(trimmedLine);
+          
+          onTextStream({
+            type: 'segment-text',
+            segmentId: currentSegmentId,
+            text: cleanText,
+            startTime: 0, // Unknown timestamp
+            isPartial: true,
+          });
+          currentSegmentId++;
+        }
+      }
+    } catch (error) {
+      // Ignore parsing errors to avoid disrupting transcription
+      console.debug('Text stream parsing error:', error);
+    }
+  }
+
+  /**
+   * Parse timestamp from whisper format
+   */
+  private parseTimestamp(minutes: string, seconds: string, milliseconds: string): number {
+    const mins = parseInt(minutes, 10);
+    const secs = parseInt(seconds, 10);
+    const millis = parseInt(milliseconds, 10);
+    return mins * 60 + secs + millis / 1000;
+  }
+
+  /**
+   * Clean text by removing ANSI color codes and extra whitespace
+   */
+  private cleanText(text: string): string {
+    // Remove ANSI color codes (e.g., \u001b[38;5;71m and \u001b[0m)
+    const cleanedText = text
+      .replace(/\u001b\[[0-9;]*m/g, '') // Remove ANSI escape codes
+      .replace(/\s+/g, ' ') // Replace multiple whitespace with single space
+      .trim(); // Remove leading/trailing whitespace
+    
+    return cleanedText;
   }
 }
 

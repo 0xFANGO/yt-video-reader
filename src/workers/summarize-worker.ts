@@ -2,9 +2,10 @@ import { Job } from 'bullmq';
 import { TranscriptionResult } from '../types/audio.js';
 import { aiSummarizer, SummaryResult, SummaryOptions } from '../services/ai-summarizer.js';
 import { fileManager } from '../utils/file-manager.js';
+import { broadcastTaskUpdate } from '../api/events.js';
 import { existsSync } from 'fs';
 import { promises as fs } from 'fs';
-import path from 'path';
+// import path from 'path'; // Future use
 
 /**
  * Summarization job data
@@ -62,6 +63,10 @@ export class SummarizeWorker {
 
       // Update job progress
       job.updateProgress(10);
+      broadcastTaskUpdate(taskId, {
+        type: 'progress',
+        data: { stage: 'summarizing', progress: 10, step: 'Preparing summary options...' }
+      });
 
       // Prepare summary options
       const summaryOptions: SummaryOptions = {
@@ -72,9 +77,22 @@ export class SummarizeWorker {
         includeTimestamps: options?.includeTimestamps ?? true,
       };
 
-      // Generate summary
+      // Generate summary with progress callbacks
       job.updateProgress(30);
-      const summaryResult = await aiSummarizer.generateSummary(summaryOptions);
+      broadcastTaskUpdate(taskId, {
+        type: 'progress',
+        data: { stage: 'summarizing', progress: 30, step: 'Starting AI summary generation...' }
+      });
+      
+      const summaryResult = await aiSummarizer.generateSummary(summaryOptions, (progress, step) => {
+        // Convert AI summarizer progress (85-100) to job progress (30-95)
+        const jobProgress = 30 + ((progress - 85) / 15) * 65;
+        job.updateProgress(Math.min(95, Math.max(30, jobProgress)));
+        broadcastTaskUpdate(taskId, {
+          type: 'progress',
+          data: { stage: 'summarizing', progress: jobProgress, step }
+        });
+      });
 
       // Calculate processing time
       const processingTime = Date.now() - startTime;
@@ -96,6 +114,10 @@ export class SummarizeWorker {
       console.log(`Topics: ${summaryResult.topics.length}`);
 
       job.updateProgress(100);
+      broadcastTaskUpdate(taskId, {
+        type: 'progress',
+        data: { stage: 'summarizing', progress: 100, step: 'Summary generation completed' }
+      });
 
       return {
         taskId,

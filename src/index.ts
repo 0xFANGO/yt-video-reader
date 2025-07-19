@@ -107,7 +107,7 @@ class VideoProcessorServer {
 
     // SSE routes
     this.app.get('/api/events/stream', createSSEHandler());
-    this.app.get('/api/events/task/:taskId', createTaskSSEHandler());
+    this.app.get('/api/events/task/:taskId/stream', createTaskSSEHandler());
 
     // Static file serving (for frontend if needed)
     this.app.use(express.static('public'));

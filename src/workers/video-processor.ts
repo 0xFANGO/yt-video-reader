@@ -6,6 +6,7 @@ import { audioProcessor } from '../services/audio-processor.js';
 import { transcriber } from '../services/transcriber.js';
 import { aiSummarizer } from '../services/ai-summarizer.js';
 import { fileManager } from '../utils/file-manager.js';
+import { broadcastTaskUpdate } from '../api/events.js';
 
 /**
  * Video processor worker - handles the complete video processing pipeline
@@ -32,7 +33,12 @@ export class VideoProcessorWorker {
         taskId,
         outputDir: taskDir,
         onProgress: (progress) => {
-          job.updateProgress(10 + (progress * 0.15)); // 10-25%
+          const jobProgress = 10 + (progress * 0.15); // 10-25%
+          job.updateProgress(jobProgress);
+          broadcastTaskUpdate(taskId, {
+            type: 'progress',
+            data: { stage: 'downloading', progress: jobProgress, step: `Downloading video... ${Math.round(progress)}%` }
+          });
         },
       });
 
@@ -52,7 +58,12 @@ export class VideoProcessorWorker {
         sampleRate: 16000,
         channels: 1,
         onProgress: (progress) => {
-          job.updateProgress(25 + (progress * 0.15)); // 25-40%
+          const jobProgress = 25 + (progress * 0.15); // 25-40%
+          job.updateProgress(jobProgress);
+          broadcastTaskUpdate(taskId, {
+            type: 'progress',
+            data: { stage: 'extracting', progress: jobProgress, step: `Extracting audio... ${Math.round(progress)}%` }
+          });
         },
       });
 
@@ -68,7 +79,12 @@ export class VideoProcessorWorker {
         inputPath: audioResult.audioPath,
         outputDir: taskDir,
         onProgress: (progress) => {
-          job.updateProgress(40 + (progress * 0.15)); // 40-55%
+          const jobProgress = 40 + (progress * 0.15); // 40-55%
+          job.updateProgress(jobProgress);
+          broadcastTaskUpdate(taskId, {
+            type: 'progress',
+            data: { stage: 'separating', progress: jobProgress, step: `Separating vocals... ${Math.round(progress)}%` }
+          });
         },
       });
 
@@ -97,7 +113,19 @@ export class VideoProcessorWorker {
         outputDir: taskDir,
         config: audioConfig,
         onProgress: (progress) => {
-          job.updateProgress(55 + (progress * 0.25)); // 55-80%
+          const jobProgress = 55 + (progress * 0.25); // 55-80%
+          job.updateProgress(jobProgress);
+          broadcastTaskUpdate(taskId, {
+            type: 'progress',
+            data: { stage: 'transcribing', progress: jobProgress, step: `Transcribing audio... ${Math.round(progress)}%` }
+          });
+        },
+        onTextStream: (segment) => {
+          // Broadcast real-time transcription text
+          broadcastTaskUpdate(taskId, {
+            type: 'text-stream',
+            data: segment
+          });
         },
       });
 
@@ -119,6 +147,14 @@ export class VideoProcessorWorker {
         language: options?.language || 'English',
         style: 'concise',
         includeTimestamps: true,
+      }, (progress, step) => {
+        // Convert AI summarizer progress (85-100) to job progress (80-95)
+        const jobProgress = 80 + ((progress - 85) / 15) * 15;
+        job.updateProgress(Math.min(95, Math.max(80, jobProgress)));
+        broadcastTaskUpdate(taskId, {
+          type: 'progress',
+          data: { stage: 'summarizing', progress: jobProgress, step }
+        });
       });
 
       // Update manifest with summary files
@@ -131,6 +167,20 @@ export class VideoProcessorWorker {
 
       // Step 6: Complete processing
       await this.updateTaskStatus(taskId, 'completed', 100, 'Processing completed successfully');
+      job.updateProgress(100);
+      broadcastTaskUpdate(taskId, {
+        type: 'complete',
+        data: { 
+          status: 'completed', 
+          progress: 100, 
+          step: 'All processing completed successfully',
+          summary: {
+            duration: downloadResult.duration,
+            segments: transcriptionResult.segments.length,
+            topics: summaryResult.topics.length
+          }
+        }
+      });
       
       console.log(`Video processing completed for task: ${taskId}`);
       console.log(`Total duration: ${downloadResult.duration} seconds`);
@@ -181,6 +231,12 @@ export class VideoProcessorWorker {
 
       // Save updated manifest
       await fileManager.saveManifest(taskId, manifest);
+
+      // Broadcast status update to SSE clients
+      broadcastTaskUpdate(taskId, {
+        type: 'status',
+        data: manifest
+      });
 
       console.log(`Task ${taskId} status updated: ${status} (${progress}%)`);
     } catch (error) {

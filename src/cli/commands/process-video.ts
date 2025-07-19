@@ -73,6 +73,10 @@ export async function processVideoCommand(client: CLITRPCClient, config: CLIConf
     
     if (shouldMonitor) {
       console.log('\n' + chalk.bold('📊 Monitoring Progress\n'));
+      
+      // Check if task is already in progress or wait for it to start
+      console.log(chalk.dim('Waiting for task to start processing...'));
+      
       await monitorTaskProgress(task.taskId, client, {
         enableAnimations: true,
         showETA: true,
