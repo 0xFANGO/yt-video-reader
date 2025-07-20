@@ -86,7 +86,7 @@ export class WhisperCLI {
     // const srtOutputPath = `${outputBaseName}.srt`; // Future use
     const txtOutputPath = `${outputBaseName}.txt`;
 
-    // Build whisper command arguments to match your working format
+    // Build whisper command arguments to ensure timestamp extraction
     const args = [
       '-m', this.modelPath,
       '-f', audioPath,
@@ -96,11 +96,15 @@ export class WhisperCLI {
       '-pc',  // print colors
       '-otxt', // output txt
       '-osrt', // output srt
+      '-oj',   // output json - CRITICAL for timestamps
+      '-t', '8', // number of threads
     ];
 
-    // Add word timestamps if enabled
+    // Add word timestamps if enabled - ENHANCED for better timestamp extraction
     if (config.wordTimestamps) {
       args.push('-ml', '1'); // max line length for word timestamps
+      args.push('-sow');     // split on word - improves timestamp accuracy
+      args.push('-wt', '0.01'); // word timestamp threshold - more sensitive
     }
 
     try {
@@ -117,16 +121,17 @@ export class WhisperCLI {
         throw new Error(`Whisper transcription failed with exit code ${result.exitCode}: ${result.stderr}`);
       }
 
-      // Parse the output - prioritize text file since we're using whisper-cli
+      // Parse the output - prioritize JSON file for timestamp extraction
       let transcriptionResult: TranscriptionResult;
       
-      if (existsSync(txtOutputPath)) {
-        const textContent = await fs.readFile(txtOutputPath, 'utf-8');
-        console.log('Transcription text content:', textContent.substring(0, 200) + '...');
-        transcriptionResult = parseWhisperOutput(textContent);
-      } else if (existsSync(jsonOutputPath)) {
+      if (existsSync(jsonOutputPath)) {
         const jsonContent = await fs.readFile(jsonOutputPath, 'utf-8');
+        console.log('Using JSON output for timestamps:', jsonContent.substring(0, 200) + '...');
         transcriptionResult = parseWhisperOutput(jsonContent);
+      } else if (existsSync(txtOutputPath)) {
+        const textContent = await fs.readFile(txtOutputPath, 'utf-8');
+        console.log('Fallback to text content (no timestamps):', textContent.substring(0, 200) + '...');
+        transcriptionResult = parseWhisperOutput(textContent);
       } else {
         // Fallback to stdout if no files are generated
         console.log('No output files found, using stdout:', result.stdout.substring(0, 200) + '...');

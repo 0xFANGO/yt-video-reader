@@ -130,6 +130,17 @@ async function testPrompt() {
     
     console.log('✅ 已加载转录数据');
     console.log(`📄 转录文本长度: ${transcription.text.length} 字符`);
+
+    // ✅ NEW: Validate timestamps
+    const hasValidTimestamps = transcription.segments && transcription.segments.some(seg => seg.start > 0 || seg.end > 0);
+    console.log(`⏰ 时间戳状态: ${hasValidTimestamps ? '✅ 有效' : '❌ 全部为0'}`);
+
+    if (hasValidTimestamps && transcription.segments && transcription.segments.length > 0) {
+      const firstSeg = transcription.segments[0];
+      const lastSeg = transcription.segments[transcription.segments.length - 1];
+      console.log(`⏱️  时间范围: ${firstSeg.start}s - ${lastSeg.end}s`);
+    }
+
     console.log(`⏱️  视频时长: ${Math.round(transcription.duration / 60)} 分钟\n`);
 
     // 构建提示词
@@ -138,7 +149,14 @@ async function testPrompt() {
     
     console.log('🔨 构建提示词完成');
     console.log(`📝 系统提示词长度: ${systemPrompt.length} 字符`);
-    console.log(`📝 用户提示词长度: ${userPrompt.length} 字符\n`);
+    console.log(`📝 用户提示词长度: ${userPrompt.length} 字符`);
+
+    // ✅ NEW: Verify prompt contains timestamps
+    if (hasValidTimestamps) {
+      const hasTimestampMarkers = userPrompt.includes('[0') && userPrompt.includes(':');
+      console.log(`🔍 提示词包含时间轴: ${hasTimestampMarkers ? '✅ 是' : '❌ 否'}`);
+    }
+    console.log('');
 
     // 调用OpenAI API
     console.log('🤖 正在调用 OpenAI API...');

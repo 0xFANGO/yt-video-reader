@@ -109,19 +109,42 @@ export function parseWhisperOutput(output: string): TranscriptionResult {
   try {
     const jsonOutput = JSON.parse(output);
     
-    return {
-      text: jsonOutput.text || '',
-      segments: jsonOutput.segments?.map((seg: any) => ({
-        start: seg.start || 0,
-        end: seg.end || 0,
+    // Enhanced timestamp parsing with proper number conversion
+    const segments = jsonOutput.segments?.map((seg: any, index: number) => {
+      // Convert to numbers, handling various input types
+      const start = seg.start !== undefined && seg.start !== null ? Number(seg.start) : 0;
+      const end = seg.end !== undefined && seg.end !== null ? Number(seg.end) : 0;
+      
+      // Validate timestamps are valid numbers
+      const validStart = !isNaN(start) ? start : 0;
+      const validEnd = !isNaN(end) ? end : 0;
+      
+      // Log first few segments for debugging
+      if (index < 3) {
+        console.log(`Segment ${index}: start=${seg.start}(${typeof seg.start}) -> ${validStart}, end=${seg.end}(${typeof seg.end}) -> ${validEnd}`);
+      }
+      
+      return {
+        start: validStart,
+        end: validEnd,
         text: seg.text || '',
         confidence: seg.confidence,
-      })) || [],
+      };
+    }) || [];
+    
+    // Log timestamp validation summary
+    const hasValidTimestamps = segments.some((seg: TranscriptionSegment) => seg.start > 0 || seg.end > 0);
+    console.log(`Parsed ${segments.length} segments, hasValidTimestamps: ${hasValidTimestamps}`);
+    
+    return {
+      text: jsonOutput.text || '',
+      segments,
       language: jsonOutput.language || 'auto',
-      duration: jsonOutput.duration || 0,
+      duration: Number(jsonOutput.duration) || 0,
       modelUsed: 'large-v3',
     };
   } catch (error) {
+    console.log('JSON parsing failed, using plain text fallback:', error);
     // Fallback: parse plain text output
     return {
       text: output.trim(),

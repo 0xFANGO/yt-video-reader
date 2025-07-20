@@ -1,5 +1,6 @@
 import { AudioConfig, TranscriptionResult, transcriptionToSRT } from '../types/audio.js';
 import { whisperCLI } from '../utils/whisper-cli.js';
+import { formatDuration } from '../utils/time.js';
 import { promises as fs } from 'fs';
 import { existsSync } from 'fs';
 import path from 'path';
@@ -210,22 +211,25 @@ export class Transcriber {
     outputDir: string
   ): Promise<void> {
     try {
+      // Validate and fix timestamp data before saving
+      const validatedTranscription = this.validateTimestamps(transcription);
+      
       // Save full transcription as JSON
       const jsonPath = path.join(outputDir, 'transcription.json');
-      await fs.writeFile(jsonPath, JSON.stringify(transcription, null, 2));
+      await fs.writeFile(jsonPath, JSON.stringify(validatedTranscription, null, 2));
 
       // Save as SRT subtitle file
       const srtPath = path.join(outputDir, 'subtitle.srt');
-      const srtContent = transcriptionToSRT(transcription);
+      const srtContent = transcriptionToSRT(validatedTranscription);
       await fs.writeFile(srtPath, srtContent);
 
       // Save as plain text
       const txtPath = path.join(outputDir, 'transcript.txt');
-      await fs.writeFile(txtPath, transcription.text);
+      await fs.writeFile(txtPath, validatedTranscription.text);
 
       // Save word-level timestamps
       const wtsPath = path.join(outputDir, 'words.wts');
-      const wtsContent = transcription.segments
+      const wtsContent = validatedTranscription.segments
         .map(segment => `${segment.start.toFixed(3)}\t${segment.end.toFixed(3)}\t${segment.text}`)
         .join('\n');
       await fs.writeFile(wtsPath, wtsContent);
@@ -239,6 +243,61 @@ export class Transcriber {
         error
       );
     }
+  }
+
+  /**
+   * Validate and fix timestamp data
+   */
+  private validateTimestamps(transcription: TranscriptionResult): TranscriptionResult {
+    // Check if all timestamps are zero (broken case)
+    const hasValidTimestamps = transcription.segments.some(seg => seg.start > 0 || seg.end > 0);
+    
+    console.log(`Timestamp validation: ${transcription.segments.length} segments, hasValidTimestamps: ${hasValidTimestamps}`);
+    
+    if (!hasValidTimestamps && transcription.duration > 0 && transcription.segments.length > 1) {
+      console.warn('All timestamps are zero, applying fallback timing distribution');
+      
+      // Apply fallback: distribute segments evenly across duration
+      const segmentDuration = transcription.duration / transcription.segments.length;
+      const validatedSegments = transcription.segments.map((seg, index) => ({
+        ...seg,
+        start: index * segmentDuration,
+        end: (index + 1) * segmentDuration,
+      }));
+      
+      const result = {
+        ...transcription,
+        segments: validatedSegments
+      };
+      
+      console.log(`Applied fallback timing: ${validatedSegments.length} segments across ${formatDuration(transcription.duration)}`);
+      return result;
+    }
+    
+    // Validate timestamp consistency and fix any issues
+    const validatedSegments = transcription.segments.map((seg, index) => {
+      let start = seg.start;
+      let end = seg.end;
+      
+      // Ensure end >= start
+      if (end < start) {
+        console.warn(`Segment ${index}: end (${end}) < start (${start}), swapping`);
+        [start, end] = [end, start];
+      }
+      
+      // Ensure start time is not negative
+      if (start < 0) {
+        console.warn(`Segment ${index}: negative start time (${start}), setting to 0`);
+        start = 0;
+      }
+      
+      return { ...seg, start, end };
+    });
+    
+    return {
+      ...transcription,
+      segments: validatedSegments
+    };
   }
 
   /**
