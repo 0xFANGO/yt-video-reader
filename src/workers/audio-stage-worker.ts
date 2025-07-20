@@ -303,7 +303,7 @@ export class AudioStageWorker {
           transcriptionResult: stageResult, // Pass transcription results
           options: {
             language: 'English',
-            style: 'concise',
+            style: 'detailed',
             includeTimestamps: true,
           },
         }, {

@@ -145,7 +145,7 @@ export class VideoProcessorWorker {
         transcription: transcriptionResult,
         outputDir: taskDir,
         language: options?.language || 'English',
-        style: 'concise',
+        style: 'detailed',
         includeTimestamps: true,
       }, (progress, step) => {
         // Convert AI summarizer progress (85-100) to job progress (80-95)

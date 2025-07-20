@@ -96,7 +96,7 @@ export class VideoProcessingFlowProducer {
       taskId,
       options: {
         language: options?.language || 'English',
-        style: 'concise',
+        style: 'detailed',
         includeTimestamps: true,
       },
     };

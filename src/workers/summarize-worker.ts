@@ -19,7 +19,7 @@ export interface SummarizationJobData {
   transcriptionPath: string;
   options?: {
     language?: string;
-    style?: 'concise' | 'detailed' | 'bullet-points';
+    style?: 'detailed';
     includeTimestamps?: boolean;
     customPrompt?: string;
   };
@@ -106,8 +106,8 @@ export class SummarizeWorker {
       const summaryOptions: SummaryOptions = {
         transcription: transcriptionData,
         outputDir: taskDir,
-        language: options?.language || 'English',
-        style: options?.style || 'concise',
+        language: options?.language || 'Chinese',
+        style: options?.style || 'detailed',
         includeTimestamps: options?.includeTimestamps ?? true,
       };
 
@@ -145,15 +145,40 @@ export class SummarizeWorker {
 
       const processingTime = Date.now() - startTime;
 
-      // Prepare final stage result
+      // Prepare final stage result with conditional markdown file tracking
+      const files: Record<string, string> = {
+        'summary.json': `${taskDir}/summary.json`,
+        'summary.txt': `${taskDir}/summary.txt`,
+      };
+
+      // Add markdown file if deep notes were generated
+      if (summaryResult.deepNotes && summaryResult.timeline) {
+        // Determine markdown filename based on video title
+        const manifestPath = `${taskDir}/manifest.json`;
+        let markdownFileName = 'summary.md';
+        
+        try {
+          const manifestContent = await fs.readFile(manifestPath, 'utf-8');
+          const manifest = JSON.parse(manifestContent);
+          const videoTitle = manifest.title || manifest.originalTitle;
+          if (videoTitle) {
+            // Use same sanitization logic as in ai-summarizer
+            // eslint-disable-next-line no-control-regex
+            const sanitizedTitle = videoTitle.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').substring(0, 100);
+            markdownFileName = `${sanitizedTitle}.md`;
+          }
+        } catch (error) {
+          console.warn('Could not read video title for markdown filename:', error);
+        }
+        
+        files['summary.md'] = `${taskDir}/${markdownFileName}`;
+      }
+
       const stageResult: FlowStageResult = {
         taskId,
         stage: 'summarizing', // FIXED: changed from 'summarization' to match CLI
         success: true,
-        files: {
-          'summary.json': `${taskDir}/summary.json`,
-          'summary.txt': `${taskDir}/summary.txt`,
-        },
+        files,
         metadata: {
           summarizationCompletedAt: new Date().toISOString(),
           processingTime,
@@ -162,8 +187,10 @@ export class SummarizeWorker {
             keyPoints: summaryResult.keyPoints.length,
             highlights: summaryResult.highlights.length,
             topics: summaryResult.topics.length,
-            language: options?.language || 'English',
-            style: options?.style || 'concise',
+            language: options?.language || 'Chinese',
+            style: options?.style || 'detailed',
+            hasDeepNotes: !!summaryResult.deepNotes,
+            hasTimeline: !!summaryResult.timeline,
           },
         },
       };
@@ -334,8 +361,8 @@ export class SummarizeWorker {
       const summaryOptions: SummaryOptions = {
         transcription: transcriptionResult,
         outputDir: taskDir,
-        language: options?.language || 'English',
-        style: options?.style || 'concise',
+        language: options?.language || 'Chinese',
+        style: options?.style || 'detailed',
         includeTimestamps: options?.includeTimestamps ?? true,
       };
 
@@ -359,13 +386,34 @@ export class SummarizeWorker {
       // Calculate processing time
       const processingTime = Date.now() - startTime;
 
-      // Update task manifest
-      await this.updateTaskManifest(taskId, {
-        files: {
-          'summary.json': `${taskDir}/summary.json`,
-          'summary.txt': `${taskDir}/summary.txt`,
-        },
-      });
+      // Update task manifest with conditional markdown file
+      const files: Record<string, string> = {
+        'summary.json': `${taskDir}/summary.json`,
+        'summary.txt': `${taskDir}/summary.txt`,
+      };
+
+      // Add markdown file if deep notes were generated
+      if (summaryResult.deepNotes && summaryResult.timeline) {
+        const manifestPath = `${taskDir}/manifest.json`;
+        let markdownFileName = 'summary.md';
+        
+        try {
+          const manifestContent = await fs.readFile(manifestPath, 'utf-8');
+          const manifest = JSON.parse(manifestContent);
+          const videoTitle = manifest.title || manifest.originalTitle;
+          if (videoTitle) {
+            // eslint-disable-next-line no-control-regex
+            const sanitizedTitle = videoTitle.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').substring(0, 100);
+            markdownFileName = `${sanitizedTitle}.md`;
+          }
+        } catch (error) {
+          console.warn('Could not read video title for markdown filename:', error);
+        }
+        
+        files['summary.md'] = `${taskDir}/${markdownFileName}`;
+      }
+
+      await this.updateTaskManifest(taskId, { files });
 
       // Log summary statistics
       console.log(`Summarization completed for task: ${taskId}`);
@@ -407,8 +455,8 @@ export class SummarizeWorker {
             totalWords: 0,
             processingTime,
             model: 'gpt-4o',
-            language: options?.language || 'English',
-            style: options?.style || 'concise',
+            language: options?.language || 'Chinese',
+            style: options?.style || 'detailed',
           },
         },
         status: 'failed',
@@ -572,7 +620,7 @@ export class SummarizeWorker {
         transcription: transcriptionResult,
         outputDir: '/tmp',
         language: 'English',
-        style: 'concise',
+        style: 'detailed',
         includeTimestamps: false,
       });
 

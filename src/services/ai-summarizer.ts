@@ -10,8 +10,17 @@ export interface SummaryOptions {
   transcription: TranscriptionResult;
   outputDir: string;
   language?: string;
-  style?: 'concise' | 'detailed' | 'bullet-points';
+  style?: 'detailed'; // Only detailed style supported now
   includeTimestamps?: boolean;
+}
+
+/**
+ * Timeline segment for deep notes mode
+ */
+export interface TimelineSegment {
+  start: string;  // "00:00" format
+  end: string;    // "01:30" format  
+  title: string;  // Chinese segment title
 }
 
 /**
@@ -27,6 +36,9 @@ export interface SummaryResult {
   topics: string[];
   keyPoints: string[];
   conclusion?: string;
+  // Optional new fields for backward compatibility
+  timeline?: TimelineSegment[];
+  deepNotes?: string; // Markdown content for deep notes
   metadata: {
     totalWords: number;
     processingTime: number;
@@ -72,7 +84,7 @@ export class AISummarizer {
     options: SummaryOptions,
     onProgress?: (progress: number, step: string) => void
   ): Promise<SummaryResult> {
-    const { transcription, outputDir, language = 'English', style = 'concise', includeTimestamps = true } = options;
+    const { transcription, outputDir, language = 'Chinese', style = 'detailed', includeTimestamps = true } = options;
 
     // Validate transcription
     if (!transcription.text || transcription.text.trim().length === 0) {
@@ -185,7 +197,7 @@ export class AISummarizer {
             { role: 'user', content: userPrompt },
           ],
           temperature: 0.3,
-          max_tokens: 2000,
+          max_tokens: 10000, // High token count for deep notes quality
           response_format: { type: 'json_object' },
         });
 
@@ -220,35 +232,41 @@ export class AISummarizer {
    * Build system prompt for OpenAI
    */
   private buildSystemPrompt(options: { language: string; style: string }): string {
-    const { language, style } = options;
-    
-    return `You are a professional video content analyst. Your task is to analyze video transcripts and provide comprehensive summaries.
+    return `You are a professional video content analyst specializing in creating comprehensive Chinese deep notes from video transcripts.
+
+中文深度笔记格式要求（无论输入语言如何，深度笔记必须用中文输出）：
+1. 提供三个层次的分析：内容概要、关键洞察、应用思考
+2. 重点生成高质量的highlights，每个highlight就是一个时间段的核心洞察
+3. highlights应该涵盖视频的主要时间节点（约1-2分钟每个）
+4. 使用有意义的中文描述每个highlight的核心内容
+5. 生成完整的深度笔记markdown内容，包含丰富的分析和思考
+6. 即使原文是其他语言，所有输出字段都必须用中文
+
+CRITICAL: ALL output fields must be in Chinese, regardless of input language.
 
 Instructions:
 - Analyze the provided video transcript carefully
-- Focus on the main ideas, key insights, and important information
-- Provide timestamps for significant moments when available
-- Use clear, concise language in ${language}
-- Follow the ${style} style as requested
+- Focus on creating high-quality highlights that capture key moments with timestamps
+- Each highlight should represent a meaningful segment (1-2 minutes) with insightful notes
+- Generate comprehensive deep notes in markdown format
 - Always return valid JSON format
-
-Return JSON with this exact structure:
-{
-  "summary": "2-3 sentence overview of the main content",
-  "highlights": [
-    {"start": 35.2, "end": 48.5, "note": "Key point or insight"}
-  ],
-  "topics": ["topic1", "topic2", "topic3"],
-  "keyPoints": ["point1", "point2", "point3"],
-  "conclusion": "Brief conclusion if applicable"
-}
-
-Quality requirements:
 - Be accurate and factual
-- Focus on actionable insights
-- Include relevant timestamps
-- Maintain professional tone
-- Ensure JSON is properly formatted`;
+- Focus on actionable insights and deep analysis
+
+Return JSON with this structure (注意：timeline字段会自动从highlights生成，无需单独提供):
+{
+  "summary": "主要内容概述（中文）",
+  "highlights": [
+    {"start": 0, "end": 105, "note": "开场和核心主题介绍：乔布斯分享三个人生故事的框架"},
+    {"start": 105, "end": 210, "note": "第一个故事-连接人生的点：从辍学到学习书法，最终影响Mac设计"},
+    {"start": 210, "end": 315, "note": "第二个故事-爱与失落：创立苹果、被解雇、重新开始的人生转折"},
+    {"start": 315, "end": 420, "note": "第三个故事-关于死亡：癌症诊断带来的生命思考和Stay hungry, stay foolish"}
+  ],
+  "topics": ["主题1（中文）", "主题2（中文）", "主题3（中文）"],
+  "keyPoints": ["要点1（中文）", "要点2（中文）", "要点3（中文）"],
+  "conclusion": "总结（中文）",
+  "deepNotes": "# 深度笔记\\n\\n## 内容概要\\n[用2-3段话概述视频的整体内容和核心主题，突出主要观点]\\n\\n## 关键洞察\\n### 核心观点1\\n[深入分析第一个重要观点，包括背景、论证过程、实例]\\n\\n### 核心观点2\\n[深入分析第二个重要观点，挖掘深层含义]\\n\\n### 核心观点3\\n[继续分析其他重要观点，形成完整的知识体系]\\n\\n## 应用思考\\n### 实践启发\\n[如何将这些观点应用到实际生活或工作中]\\n\\n### 深度思考\\n[引发的更深层思考和哲学思辨]\\n\\n### 行动建议\\n[具体的行动建议和实施路径]"
+}`;
   }
 
   /**
@@ -258,16 +276,16 @@ Quality requirements:
     transcript: string,
     options: { language: string; style: string; duration: number }
   ): string {
-    const { language, style, duration } = options;
+    const { duration } = options;
     
-    return `Please analyze this video transcript and provide a ${style} summary in ${language}.
+    return `Please analyze this video transcript and generate comprehensive Chinese deep notes.
 
 Video Duration: ${Math.round(duration)} seconds (${Math.round(duration / 60)} minutes)
 
 Transcript:
 ${transcript}
 
-Please provide a comprehensive analysis following the JSON format specified in the system prompt.`;
+Please provide a thorough analysis following the Chinese deep notes format specified in the system prompt. Remember: ALL output must be in Chinese, regardless of the transcript language.`;
   }
 
   /**
@@ -299,13 +317,42 @@ Please provide a comprehensive analysis following the JSON format specified in t
       ? parsedResult.keyPoints.filter((p: any) => typeof p === 'string')
       : [];
 
-    return {
+    // Generate timeline from highlights (no need for separate timeline field from AI)
+    let timeline: TimelineSegment[] | undefined;
+    if (highlights.length > 0) {
+      timeline = highlights.map((highlight: any) => ({
+        start: AISummarizer.formatTimeStatic(highlight.start),
+        end: AISummarizer.formatTimeStatic(highlight.end),
+        title: highlight.note
+      }));
+    }
+
+    // Validate deepNotes field (graceful degradation)
+    let deepNotes: string | undefined;
+    if (parsedResult.deepNotes && typeof parsedResult.deepNotes === 'string') {
+      const trimmedNotes = parsedResult.deepNotes.trim();
+      if (trimmedNotes.length > 0) {
+        deepNotes = trimmedNotes;
+      }
+    }
+
+    const result: Omit<SummaryResult, 'metadata'> = {
       summary: parsedResult.summary,
       highlights,
       topics,
       keyPoints,
       conclusion: parsedResult.conclusion || undefined,
     };
+
+    // Add optional fields only if they exist
+    if (timeline) {
+      (result as any).timeline = timeline;
+    }
+    if (deepNotes) {
+      (result as any).deepNotes = deepNotes;
+    }
+
+    return result;
   }
 
   /**
@@ -329,6 +376,15 @@ Please provide a comprehensive analysis following the JSON format specified in t
    * Format time in MM:SS format
    */
   private formatTime(seconds: number): string {
+    const minutes = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+  }
+
+  /**
+   * Static format time method for use in validation
+   */
+  static formatTimeStatic(seconds: number): string {
     const minutes = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     return `${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
@@ -369,12 +425,24 @@ Please provide a comprehensive analysis following the JSON format specified in t
   private async saveSummary(summary: SummaryResult, outputDir: string): Promise<void> {
     try {
       const summaryPath = path.join(outputDir, 'summary.json');
-      await fs.writeFile(summaryPath, JSON.stringify(summary, null, 2));
+      await fs.writeFile(summaryPath, JSON.stringify(summary, null, 2), 'utf-8');
 
       // Also save human-readable version
       const readablePath = path.join(outputDir, 'summary.txt');
       const readableContent = this.formatReadableSummary(summary);
-      await fs.writeFile(readablePath, readableContent);
+      await fs.writeFile(readablePath, readableContent, 'utf-8');
+
+      // Generate markdown file for deep notes if available
+      if (summary.deepNotes && summary.timeline) {
+        const videoTitle = await this.getVideoTitle(outputDir);
+        const fileName = this.sanitizeFilename(videoTitle || 'summary') + '.md';
+        const markdownPath = path.join(outputDir, fileName);
+        
+        const markdownContent = this.buildMarkdownContent(summary, videoTitle);
+        await fs.writeFile(markdownPath, markdownContent, 'utf-8');
+        
+        console.log('Deep notes markdown saved to:', markdownPath);
+      }
 
       console.log('Summary saved to:', outputDir);
     } catch (error) {
@@ -429,6 +497,65 @@ Please provide a comprehensive analysis following the JSON format specified in t
     content += `- Style: ${summary.metadata.style}\n`;
     
     return content;
+  }
+
+  /**
+   * Get video title from manifest
+   */
+  private async getVideoTitle(outputDir: string): Promise<string | undefined> {
+    try {
+      const manifestPath = path.join(outputDir, 'manifest.json');
+      const manifestContent = await fs.readFile(manifestPath, 'utf-8');
+      const manifest = JSON.parse(manifestContent);
+      return manifest.title || manifest.originalTitle;
+    } catch (error) {
+      console.warn('Could not read video title from manifest:', error);
+      return undefined;
+    }
+  }
+
+  /**
+   * Build markdown content for deep notes
+   */
+  private buildMarkdownContent(summary: SummaryResult, videoTitle?: string): string {
+    let content = `# ${videoTitle || '视频深度笔记'}\n\n`;
+    
+    if (videoTitle) {
+      content += `## 原视频标题\n${videoTitle}\n\n`;
+    }
+    
+    // Use highlights as the primary timeline source since they're more meaningful
+    if (summary.highlights && summary.highlights.length > 0) {
+      content += `## 时间轴目录\n\n`;
+      summary.highlights.forEach((highlight) => {
+        const startTime = this.formatTime(highlight.start);
+        const endTime = this.formatTime(highlight.end);
+        content += `- **${startTime}-${endTime}**: ${highlight.note}\n`;
+      });
+      content += '\n';
+    } else if (summary.timeline && summary.timeline.length > 0) {
+      // Fallback to timeline if highlights are not available
+      content += `## 时间轴目录\n\n`;
+      summary.timeline.forEach((segment) => {
+        content += `- **${segment.start}-${segment.end}**: ${segment.title}\n`;
+      });
+      content += '\n';
+    }
+    
+    if (summary.deepNotes) {
+      content += summary.deepNotes;
+    }
+    
+    return content;
+  }
+
+  /**
+   * Sanitize filename for filesystem compatibility
+   */
+  private sanitizeFilename(filename: string): string {
+    // Allow Chinese characters but remove filesystem-problematic characters
+    // eslint-disable-next-line no-control-regex
+    return filename.replace(/[<>:"/\\|?*\u0000-\u001f]/g, '_').substring(0, 100);
   }
 
   /**

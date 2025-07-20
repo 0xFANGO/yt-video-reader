@@ -62,7 +62,7 @@ export interface SummarizationStageData {
   transcriptionResult?: any;
   options?: {
     language?: string;
-    style?: 'concise' | 'detailed' | 'bullet-points';
+    style?: 'detailed';
     includeTimestamps?: boolean;
   };
 }
