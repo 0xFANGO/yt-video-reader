@@ -15,6 +15,7 @@ import {
 import { generateTaskId, createDefaultManifest } from '../types/task.js';
 import { fileManager } from '../utils/file-manager.js';
 import { queueConfig } from '../utils/queue-config.js';
+import { videoProcessingFlowProducer } from '../services/flow-producer.js';
 import { isValidYouTubeUrl } from '../utils/validation.js';
 
 /**
@@ -40,33 +41,33 @@ export const tasksRouter = router({
           throw new Error('Invalid YouTube URL');
         }
 
-        // Generate task ID
-        const taskId = generateTaskId();
+        // Create video processing flow using the new flow system
+        // The flow producer will generate its own taskId to avoid conflicts
+        try {
+          const flowResult = await videoProcessingFlowProducer.createVideoProcessingFlow(
+            link,
+            {
+              ...(options?.language && { language: options.language }),
+              priority: options?.priority || 'normal',
+            }
+          );
 
-        // Create task directory
-        await fileManager.createTaskDirectory(taskId);
+          console.log(`Created flow-based task: ${flowResult.taskId} for URL: ${link}`);
+          console.log(`Flow ID: ${flowResult.flowId}`);
+          console.log(`Estimated duration: ${flowResult.estimatedDuration} seconds`);
 
-        // Create initial task manifest
-        const manifest = createDefaultManifest(taskId);
-        await fileManager.saveManifest(taskId, manifest);
-
-        // Add task to video processing queue
-        const videoQueue = queueConfig.createVideoQueue();
-        await videoQueue.add('process-video', {
-          taskId,
-          url: link,
-          options,
-        }, {
-          priority: options?.priority === 'high' ? 10 : options?.priority === 'low' ? 1 : 5,
-        });
-
-        console.log(`Created task: ${taskId} for URL: ${link}`);
-
-        return {
-          taskId,
-          status: 'pending',
-          message: 'Task created and queued for processing',
-        };
+          return {
+            taskId: flowResult.taskId,
+            status: 'pending',
+            message: 'Task created and queued for concurrent processing',
+          };
+        } catch (flowError) {
+          if (flowError instanceof Error && flowError.message.includes('Maximum concurrent flows exceeded')) {
+            throw new Error('System is at maximum capacity. Please try again in a few minutes.');
+          }
+          
+          throw flowError;
+        }
       }, 'Failed to create task');
     }),
 
@@ -308,28 +309,9 @@ export const tasksRouter = router({
           throw new Error('Task is not in failed state');
         }
 
-        // Reset task status
-        manifest.status = 'pending';
-        manifest.progress = 0;
-        manifest.currentStep = 'initializing';
-        delete manifest.error;
-        await fileManager.saveManifest(taskId, manifest);
-
-        // Re-add to queue
-        const videoQueue = queueConfig.createVideoQueue();
-        await videoQueue.add('process-video', {
-          taskId,
-          url: manifest.files['original.mp4'] || '', // This would need proper URL tracking
-          options: {},
-        });
-
-        console.log(`Retrying task: ${taskId}`);
-
-        return {
-          taskId,
-          success: true,
-          message: 'Task queued for retry',
-        };
+        // Note: Task retry is currently limited due to not storing original URL
+        // In the flow system, we need the original YouTube URL to recreate the flow
+        throw new Error('Task retry is currently not supported with the flow system. Please create a new task with the original YouTube URL.');
       }, 'Failed to retry task');
     }),
 });

@@ -1,8 +1,12 @@
 import { Job } from 'bullmq';
 import { TranscriptionResult } from '../types/audio.js';
+import { SummarizationStageData, FlowStageResult } from '../types/flow.js';
 import { aiSummarizer, SummaryResult, SummaryOptions } from '../services/ai-summarizer.js';
 import { fileManager } from '../utils/file-manager.js';
+import { videoProcessingFlowProducer } from '../services/flow-producer.js';
+import { stageOrchestrator } from './stage-orchestrator.js';
 import { broadcastTaskUpdate } from '../api/events.js';
+import { ProgressThrottle } from '../utils/progress-throttle.js';
 import { existsSync } from 'fs';
 import { promises as fs } from 'fs';
 // import path from 'path'; // Future use
@@ -26,7 +30,265 @@ export interface SummarizationJobData {
  */
 export class SummarizeWorker {
   /**
-   * Process summarization job
+   * Process flow-integrated summarization job for BullMQ Flows
+   */
+  async processFlowSummarizationJob(job: Job<SummarizationStageData>): Promise<FlowStageResult> {
+    const { taskId, transcriptionResult, options } = job.data;
+    const taskDir = fileManager.getTaskDirectory(taskId);
+    const startTime = Date.now();
+
+    console.log(`Starting flow summarization for task: ${taskId}`);
+    console.log(`Options:`, options);
+
+    try {
+      // Create progress throttle instance for this job (200ms intervals)
+      const progressThrottle = new ProgressThrottle(200);
+
+      // Get transcription results from parent job
+      const parentData = transcriptionResult || await this.getTranscriptionResults(job, taskId);
+      
+      if (!parentData || !parentData.files || !parentData.files['transcription.json']) {
+        throw new Error('Transcription results not available - missing transcription file');
+      }
+
+      const transcriptionPath = parentData.files['transcription.json'];
+      
+      // Validate transcription file exists
+      if (!existsSync(transcriptionPath)) {
+        throw new Error(`Transcription file not found: ${transcriptionPath}`);
+      }
+
+      // Update manifest status for CLI sync
+      await this.updateTaskManifest(taskId, { status: 'summarizing' });
+
+      // Broadcast status change for CLI sync (immediate, not throttled)
+      broadcastTaskUpdate(taskId, {
+        type: 'status-change',
+        data: { 
+          status: 'summarizing', 
+          stage: 'summarizing', 
+          progress: 0, 
+          step: 'Starting AI summary generation',
+          timestamp: new Date().toISOString()
+        }
+      });
+
+      // Update flow progress - starting summarization
+      await videoProcessingFlowProducer.updateFlowProgress(
+        taskId,
+        'summarizing', // FIXED: changed from 'summarization' to match CLI
+        0,
+        'Starting AI summary generation'
+      );
+
+      // Load transcription result
+      const transcriptionData = await this.loadTranscriptionResult(transcriptionPath);
+      
+      if (!transcriptionData) {
+        throw new Error('Failed to load transcription result');
+      }
+
+      // Validate transcription content
+      if (!transcriptionData.text || transcriptionData.text.trim().length === 0) {
+        throw new Error('Transcription text is empty');
+      }
+
+      // Update job progress
+      job.updateProgress(10);
+      await videoProcessingFlowProducer.updateFlowProgress(
+        taskId,
+        'summarizing', // FIXED: changed from 'summarization' to match CLI
+        10,
+        'Preparing summary options...'
+      );
+
+      // Prepare summary options
+      const summaryOptions: SummaryOptions = {
+        transcription: transcriptionData,
+        outputDir: taskDir,
+        language: options?.language || 'English',
+        style: options?.style || 'concise',
+        includeTimestamps: options?.includeTimestamps ?? true,
+      };
+
+      // Generate summary with progress callbacks
+      job.updateProgress(30);
+      await videoProcessingFlowProducer.updateFlowProgress(
+        taskId,
+        'summarizing', // FIXED: changed from 'summarization' to match CLI
+        30,
+        'Generating AI summary...'
+      );
+      
+      const summaryResult = await aiSummarizer.generateSummary(summaryOptions, async (progress, step) => {
+        // Convert AI summarizer progress (85-100) to job progress (30-95)
+        const jobProgress = 30 + ((progress - 85) / 15) * 65;
+        const finalProgress = Math.min(95, Math.max(30, jobProgress));
+        
+        job.updateProgress(finalProgress);
+        
+        // THROTTLE progress broadcasts to prevent console spam
+        if (await progressThrottle.shouldUpdate()) {
+          videoProcessingFlowProducer.updateFlowProgress(
+            taskId,
+            'summarizing', // FIXED: changed from 'summarization' to match CLI
+            finalProgress,
+            step
+          );
+
+          broadcastTaskUpdate(taskId, {
+            type: 'progress',
+            data: { stage: 'summarizing', progress: finalProgress, step } // FIXED: stage ID
+          });
+        }
+      });
+
+      const processingTime = Date.now() - startTime;
+
+      // Prepare final stage result
+      const stageResult: FlowStageResult = {
+        taskId,
+        stage: 'summarizing', // FIXED: changed from 'summarization' to match CLI
+        success: true,
+        files: {
+          'summary.json': `${taskDir}/summary.json`,
+          'summary.txt': `${taskDir}/summary.txt`,
+        },
+        metadata: {
+          summarizationCompletedAt: new Date().toISOString(),
+          processingTime,
+          summaryStats: {
+            summaryLength: summaryResult.summary.length,
+            keyPoints: summaryResult.keyPoints.length,
+            highlights: summaryResult.highlights.length,
+            topics: summaryResult.topics.length,
+            language: options?.language || 'English',
+            style: options?.style || 'concise',
+          },
+        },
+      };
+
+      // Update task manifest - final completion
+      await this.updateTaskManifest(taskId, {
+        status: 'completed',
+        currentStep: 'All processing completed successfully',
+        progress: 100,
+        finishedAt: new Date().toISOString(),
+        files: stageResult.files,
+      });
+
+      // Notify stage orchestrator of completion (this will complete the entire flow)
+      await stageOrchestrator.handleStageCompletion(taskId, 'summarizing', stageResult); // FIXED: stage ID
+
+      // Final progress update - complete flow
+      await videoProcessingFlowProducer.updateFlowProgress(
+        taskId,
+        'summarizing', // FIXED: changed from 'summarization' to match CLI
+        100,
+        'Video processing flow completed successfully'
+      );
+
+      job.updateProgress(100);
+      
+      // Broadcast final completion
+      broadcastTaskUpdate(taskId, {
+        type: 'complete',
+        data: {
+          status: 'completed',
+          progress: 100,
+          step: 'All processing completed successfully',
+          summary: {
+            summaryLength: summaryResult.summary.length,
+            keyPoints: summaryResult.keyPoints.length,
+            topics: summaryResult.topics.length
+          }
+        }
+      });
+
+      console.log(`Flow summarization completed for task: ${taskId}`);
+      console.log(`Processing time: ${processingTime}ms`);
+      console.log(`Summary length: ${summaryResult.summary.length} characters`);
+      console.log(`Key points: ${summaryResult.keyPoints.length}`);
+      console.log(`Topics: ${summaryResult.topics.length}`);
+
+      return stageResult;
+    } catch (error) {
+      const processingTime = Date.now() - startTime;
+      console.error(`Flow summarization failed for task ${taskId}:`, error);
+
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      
+      // Create failure result
+      const stageResult: FlowStageResult = {
+        taskId,
+        stage: 'summarizing', // FIXED: changed from 'summarization' to match CLI
+        success: false,
+        files: {},
+        metadata: {
+          error: errorMessage,
+          failedAt: new Date().toISOString(),
+          processingTime,
+        },
+        error: errorMessage,
+      };
+
+      // Update task manifest with error
+      await this.updateTaskManifest(taskId, {
+        status: 'failed',
+        error: errorMessage,
+      });
+
+      // Notify stage orchestrator of failure
+      await stageOrchestrator.handleStageFailure(taskId, 'summarizing', errorMessage, job); // FIXED: stage ID
+
+      // Update flow with failure
+      await videoProcessingFlowProducer.failFlow(taskId, errorMessage);
+
+      throw error; // Re-throw to let BullMQ handle retry logic
+    }
+  }
+
+  /**
+   * Get transcription results from parent job or task manifest
+   */
+  private async getTranscriptionResults(job: Job, taskId: string): Promise<any> {
+    try {
+      // First try to get from task manifest (most reliable method)
+      const manifest = await fileManager.loadManifest(taskId);
+      
+      if (manifest && manifest.files && manifest.files['transcription.json']) {
+        console.log(`Got transcription results from manifest for ${taskId}`);
+        return { files: manifest.files };
+      }
+
+      // For BullMQ flows, parent results should be available in job data or dependencies
+      // Try to get parent job result if available (disabled due to TypeScript compatibility)
+      /*
+      try {
+        if (job.parent) {
+          const parentJob = await job.parent;
+          if (parentJob) {
+            const parentResult = parentJob.returnvalue;
+            if (parentResult && parentResult.files) {
+              console.log(`Got transcription results from parent job for ${taskId}`);
+              return parentResult;
+            }
+          }
+        }
+      } catch (parentError) {
+        console.warn('Could not get parent job result:', parentError);
+      }
+      */
+
+      throw new Error('No transcription results available from parent job or manifest');
+    } catch (error) {
+      console.error('Failed to get transcription results:', error);
+      throw new Error('Could not retrieve transcription results for summarization');
+    }
+  }
+
+  /**
+   * Process summarization job (legacy method - preserved for backward compatibility)
    */
   async processSummarizationJob(job: Job<SummarizationJobData>): Promise<{
     taskId: string;
@@ -518,6 +780,22 @@ export async function processSummarizationTestJob(job: Job<{
 }>): Promise<any> {
   const worker = new SummarizeWorker();
   return await worker.testSummarizationCapability(job);
+}
+
+/**
+ * Multi-job processor for summarization worker (handles both flow and legacy jobs)
+ */
+export async function processSummarizationJobs(job: Job): Promise<any> {
+  const worker = new SummarizeWorker();
+  
+  // Route based on job name
+  switch (job.name) {
+    case 'generate-summary':
+      return await worker.processFlowSummarizationJob(job as Job<SummarizationStageData>);
+    case 'process-summarization':
+    default:
+      return await worker.processSummarizationJob(job as Job<SummarizationJobData>);
+  }
 }
 
 /**

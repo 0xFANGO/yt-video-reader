@@ -1,4 +1,4 @@
-import { Queue, Worker, ConnectionOptions } from 'bullmq';
+import { Queue, Worker, ConnectionOptions, FlowProducer } from 'bullmq';
 import IORedis from 'ioredis';
 
 /**
@@ -10,7 +10,7 @@ export class QueueConfig {
 
   constructor(redisUrl: string = process.env.REDIS_URL || 'redis://localhost:6379') {
     this.redisConnection = new IORedis(redisUrl, {
-      maxRetriesPerRequest: 3,
+      maxRetriesPerRequest: null, // Fix BullMQ deprecation warning
       lazyConnect: true,
       connectionName: 'yt-video-processor',
     });
@@ -138,9 +138,80 @@ export class QueueConfig {
   }
 
   /**
-   * Create video processing worker
+   * Create flow producer for multi-stage video processing
+   */
+  createFlowProducer(): FlowProducer {
+    return new FlowProducer({
+      connection: this.redisConnection,
+    });
+  }
+
+  /**
+   * Create video processing orchestrator queue
+   */
+  createVideoProcessingOrchestratorQueue(): Queue {
+    return new Queue('video-processing-orchestrator', {
+      connection: this.redisConnection,
+      defaultJobOptions: {
+        removeOnComplete: 10,
+        removeOnFail: 50,
+        attempts: 1, // Orchestrator shouldn't retry, let individual stages handle retries
+        backoff: {
+          type: 'exponential',
+          delay: 2000,
+        },
+      },
+    });
+  }
+
+  /**
+   * Create audio processing queue
+   */
+  createAudioProcessingQueue(): Queue {
+    return new Queue('audio-processing', {
+      connection: this.redisConnection,
+      defaultJobOptions: {
+        removeOnComplete: 5,
+        removeOnFail: 20,
+        attempts: 2, // Audio processing can be memory intensive
+        backoff: {
+          type: 'exponential',
+          delay: 5000,
+        },
+      },
+    });
+  }
+
+  /**
+   * Create video processing orchestrator worker
+   */
+  createVideoProcessingOrchestratorWorker(processor: any): Worker {
+    return new Worker('video-processing-orchestrator', processor, {
+      connection: this.redisConnection,
+      concurrency: parseInt(process.env.ORCHESTRATOR_CONCURRENCY || '5'), // Allow multiple flows
+    });
+  }
+
+  /**
+   * Create audio processing stage worker
+   */
+  createAudioProcessingWorker(processor: any): Worker {
+    return new Worker('audio-processing', processor, {
+      connection: this.redisConnection,
+      concurrency: parseInt(process.env.AUDIO_PROCESSING_CONCURRENCY || '2'), // Memory management
+      limiter: {
+        max: 2,
+        duration: 2000, // Limit to prevent memory overload
+      },
+    });
+  }
+
+  /**
+   * Create video processing worker (DEPRECATED - use flow system instead)
+   * @deprecated Use createFlowProducer and stage workers instead
    */
   createVideoProcessingWorker(processor: any): Worker {
+    console.warn('DEPRECATED: createVideoProcessingWorker is deprecated. Use flow-based processing instead.');
     return new Worker('video-processing', processor, {
       connection: this.redisConnection,
       concurrency: 1,
@@ -204,7 +275,14 @@ export class QueueConfig {
    * Clear all queues
    */
   async clearAllQueues(): Promise<void> {
-    const queueNames = ['video-processing', 'download', 'transcription', 'summarization'];
+    const queueNames = [
+      'video-processing', 
+      'video-processing-orchestrator',
+      'download', 
+      'audio-processing',
+      'transcription', 
+      'summarization'
+    ];
     
     for (const queueName of queueNames) {
       try {
@@ -249,7 +327,9 @@ export const queueConfig = new QueueConfig();
  */
 export const QUEUE_NAMES = {
   VIDEO_PROCESSING: 'video-processing',
+  VIDEO_PROCESSING_ORCHESTRATOR: 'video-processing-orchestrator',
   DOWNLOAD: 'download',
+  AUDIO_PROCESSING: 'audio-processing',
   TRANSCRIPTION: 'transcription',
   SUMMARIZATION: 'summarization',
 } as const;

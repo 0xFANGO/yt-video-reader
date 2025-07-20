@@ -1,7 +1,12 @@
 import { Job } from 'bullmq';
 import { TaskProcessingData } from '../types/task.js';
+import { DownloadStageData, FlowStageResult } from '../types/flow.js';
 import { youTubeDownloader } from '../services/youtube-downloader.js';
 import { fileManager } from '../utils/file-manager.js';
+import { videoProcessingFlowProducer } from '../services/flow-producer.js';
+import { stageOrchestrator } from './stage-orchestrator.js';
+import { broadcastTaskUpdate } from '../api/events.js';
+import { ProgressThrottle } from '../utils/progress-throttle.js';
 
 /**
  * Download job data
@@ -21,7 +26,168 @@ export interface DownloadJobData {
  */
 export class DownloadWorker {
   /**
-   * Process download job
+   * Process flow-integrated download job for BullMQ Flows
+   */
+  async processFlowDownloadJob(job: Job<DownloadStageData>): Promise<FlowStageResult> {
+    const { taskId, url, options } = job.data;
+    const taskDir = fileManager.getTaskDirectory(taskId);
+
+    console.log(`Starting flow download for task: ${taskId}`);
+    console.log(`URL: ${url}`);
+    console.log(`Options:`, options);
+
+    try {
+      // Create progress throttle instance for this job (200ms intervals)
+      const progressThrottle = new ProgressThrottle(200);
+
+      // Update flow progress
+      await videoProcessingFlowProducer.updateFlowProgress(
+        taskId,
+        'downloading', // FIXED: changed from 'download' to match CLI
+        0,
+        'Starting video download'
+      );
+
+      // Broadcast download start
+      broadcastTaskUpdate(taskId, {
+        type: 'progress',
+        data: { stage: 'downloading', progress: 0, step: 'Starting video download...' } // FIXED: stage ID
+      });
+
+      // Initialize task directory
+      await fileManager.createTaskDirectory(taskId);
+
+      // Update job progress
+      job.updateProgress(0);
+
+      // Download video with progress tracking
+      const downloadResult = await youTubeDownloader.downloadVideo(url, {
+        taskId,
+        outputDir: taskDir,
+        format: options?.format || 'best[ext=mp4][height<=1080]',
+        quality: options?.quality || 'best',
+        onProgress: async (progress) => {
+          job.updateProgress(progress);
+          
+          // THROTTLE progress broadcasts to prevent console spam
+          if (await progressThrottle.shouldUpdate()) {
+            // Update flow progress (throttled)
+            videoProcessingFlowProducer.updateFlowProgress(
+              taskId,
+              'downloading', // FIXED: changed from 'download' to match CLI
+              progress,
+              `Downloading video... ${Math.round(progress)}%`
+            );
+
+            // Broadcast progress (throttled to ~5 updates per second)
+            broadcastTaskUpdate(taskId, {
+              type: 'progress',
+              data: { stage: 'downloading', progress, step: `Downloading video... ${Math.round(progress)}%` } // FIXED: stage ID
+            });
+          }
+        },
+      });
+
+      // Download thumbnail if available
+      const thumbnailPath = await youTubeDownloader.downloadThumbnail(url, taskDir);
+      if (thumbnailPath) {
+        console.log(`Thumbnail downloaded: ${thumbnailPath}`);
+      }
+
+      // Prepare stage result for next stage
+      const stageResult: FlowStageResult = {
+        taskId,
+        stage: 'download',
+        success: true,
+        files: {
+          'original.mp4': downloadResult.videoPath,
+          ...(thumbnailPath && { 'thumbnail.jpg': thumbnailPath }),
+        },
+        metadata: {
+          videoTitle: downloadResult.title,
+          videoDuration: downloadResult.duration,
+          fileSize: downloadResult.fileSize,
+          downloadCompletedAt: new Date().toISOString(),
+        },
+      };
+
+      // Update task manifest
+      await this.updateTaskManifest(taskId, {
+        status: 'downloading',
+        videoTitle: downloadResult.title,
+        videoDuration: downloadResult.duration,
+        files: stageResult.files,
+      });
+
+      // Final progress update
+      await videoProcessingFlowProducer.updateFlowProgress(
+        taskId,
+        'downloading', // FIXED: changed from 'download' to match CLI
+        100,
+        'Download completed, starting audio processing'
+      );
+
+      console.log(`Flow download completed for task: ${taskId}`);
+
+      // Add audio processing job now that download is complete
+      try {
+        const { queueConfig } = await import('../utils/queue-config.js');
+        const audioQueue = queueConfig.createAudioProcessingQueue();
+        
+        const audioJob = await audioQueue.add('process-audio', {
+          taskId,
+          downloadResult: stageResult, // Pass download results
+        }, {
+          jobId: `${taskId}-audio`,
+          priority: 8,
+          attempts: 2,
+        });
+        
+        console.log(`Audio processing job queued for task: ${taskId}`);
+      } catch (error) {
+        console.error(`Failed to queue audio processing for ${taskId}:`, error);
+      }
+      console.log(`Video title: ${downloadResult.title}`);
+      console.log(`Duration: ${downloadResult.duration} seconds`);
+      console.log(`File size: ${Math.round(downloadResult.fileSize / 1024 / 1024)} MB`);
+
+      return stageResult;
+    } catch (error) {
+      console.error(`Flow download failed for task ${taskId}:`, error);
+      
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      
+      // Create failure result
+      const stageResult: FlowStageResult = {
+        taskId,
+        stage: 'download',
+        success: false,
+        files: {},
+        metadata: {
+          error: errorMessage,
+          failedAt: new Date().toISOString(),
+        },
+        error: errorMessage,
+      };
+
+      // Update task manifest with error
+      await this.updateTaskManifest(taskId, {
+        status: 'failed',
+        error: errorMessage,
+      });
+
+      // Notify stage orchestrator of failure
+      await stageOrchestrator.handleStageFailure(taskId, 'download', errorMessage, job);
+
+      // Update flow with failure
+      await videoProcessingFlowProducer.failFlow(taskId, errorMessage);
+
+      throw error; // Re-throw to let BullMQ handle retry logic
+    }
+  }
+
+  /**
+   * Process download job (legacy method - preserved for backward compatibility)
    */
   async processDownloadJob(job: Job<DownloadJobData>): Promise<{
     taskId: string;
@@ -315,6 +481,22 @@ export async function processVideoInfoJob(job: Job<{ url: string }>): Promise<an
 export async function processUrlValidationJob(job: Job<{ url: string }>): Promise<any> {
   const worker = new DownloadWorker();
   return await worker.validateUrl(job);
+}
+
+/**
+ * Multi-job processor for download worker (handles both flow and legacy jobs)
+ */
+export async function processDownloadJobs(job: Job): Promise<any> {
+  const worker = new DownloadWorker();
+  
+  // Route based on job name
+  switch (job.name) {
+    case 'download-video':
+      return await worker.processFlowDownloadJob(job as Job<DownloadStageData>);
+    case 'process-download':
+    default:
+      return await worker.processDownloadJob(job as Job<DownloadJobData>);
+  }
 }
 
 /**

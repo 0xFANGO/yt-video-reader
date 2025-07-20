@@ -9,6 +9,11 @@ import { createSSEHandler, createTaskSSEHandler, startTaskMonitoring } from './a
 import { queueConfig } from './utils/queue-config.js';
 import { validateEnvironment } from './utils/validation.js';
 import { youTubeDownloader } from './services/youtube-downloader.js';
+// Orchestrator removed - using simplified flow structure
+import { processDownloadJobs } from './workers/download-worker.js';
+import { processAudioJobs } from './workers/audio-stage-worker.js';
+import { processSummarizationJobs } from './workers/summarize-worker.js';
+// Legacy imports for backward compatibility
 import { processVideoJob } from './workers/video-processor.js';
 import { processDownloadJob } from './workers/download-worker.js';
 import { processTranscriptionJob } from './workers/transcribe-worker.js';
@@ -202,31 +207,37 @@ class VideoProcessorServer {
     console.log('Starting BullMQ workers...');
 
     try {
-      // Video processing worker
-      const videoWorker = queueConfig.createVideoProcessingWorker(processVideoJob);
-      this.workers.push(videoWorker);
-      console.log('✓ Video processing worker started');
+      // Flow-based workers for concurrent processing (no orchestrator needed)
 
-      // Download worker
-      const downloadWorker = queueConfig.createDownloadWorker(processDownloadJob);
+      // Download worker (flow-integrated)
+      const downloadWorker = queueConfig.createDownloadWorker(processDownloadJobs);
       this.workers.push(downloadWorker);
-      console.log('✓ Download worker started');
+      console.log('✓ Download worker started (concurrent: 3)');
 
-      // Transcription worker
-      const transcriptionWorker = queueConfig.createTranscriptionWorker(processTranscriptionJob);
-      this.workers.push(transcriptionWorker);
-      console.log('✓ Transcription worker started');
+      // Audio processing worker (combines extraction + transcription)
+      const audioWorker = queueConfig.createAudioProcessingWorker(processAudioJobs);
+      this.workers.push(audioWorker);
+      console.log('✓ Audio processing worker started (concurrent: 2)');
 
-      // Summarization worker
-      const summarizationWorker = queueConfig.createSummarizationWorker(processSummarizationJob);
+      // Summarization worker (flow-integrated)
+      const summarizationWorker = queueConfig.createSummarizationWorker(processSummarizationJobs);
       this.workers.push(summarizationWorker);
-      console.log('✓ Summarization worker started');
+      console.log('✓ Summarization worker started (concurrent: 1)');
+      
+      // Legacy workers for backward compatibility
+      const legacyVideoWorker = queueConfig.createVideoProcessingWorker(processVideoJob);
+      this.workers.push(legacyVideoWorker);
+      console.log('✓ Legacy video processing worker started (DEPRECATED)');
+
+      const legacyTranscriptionWorker = queueConfig.createTranscriptionWorker(processTranscriptionJob);
+      this.workers.push(legacyTranscriptionWorker);
+      console.log('✓ Legacy transcription worker started (DEPRECATED)');
 
       // Start task monitoring for SSE
       await startTaskMonitoring();
       console.log('✓ Task monitoring started');
 
-      console.log(`All workers started successfully (${this.workers.length} workers)`);
+      console.log(`All workers started successfully (${this.workers.length} workers - flow-based + legacy)`);
     } catch (error) {
       console.error('Failed to start workers:', error);
       throw error;

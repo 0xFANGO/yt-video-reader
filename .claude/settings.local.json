@@ -25,7 +25,8 @@
       "Bash(npm run build:*)",
       "Bash(npm run lint:*)",
       "Bash(curl:*)",
-      "Bash(redis-cli:*)"
+      "Bash(redis-cli:*)",
+      "WebFetch(domain:docs.bullmq.io)"
     ],
     "deny": []
   }

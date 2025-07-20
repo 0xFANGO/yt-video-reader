@@ -405,7 +405,7 @@ export function createTaskSSEHandler() {
  * Function to broadcast task updates (to be called from workers)
  */
 export function broadcastTaskUpdate(taskId: string, update: {
-  type: 'progress' | 'status' | 'error' | 'complete' | 'text-stream';
+  type: 'progress' | 'status' | 'error' | 'complete' | 'text-stream' | 'flow-start' | 'stage-complete' | 'stage-failed' | 'status-change';
   data: any;
 }): void {
   sseManager.broadcastToTask(taskId, {

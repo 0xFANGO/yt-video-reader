@@ -54,6 +54,19 @@ export const PROCESSING_STAGES: ProcessingStage[] = [
 ];
 
 /**
+ * Map legacy stage IDs to current CLI stage IDs for backwards compatibility
+ */
+function mapStageId(stage: string): string {
+  const stageMapping: Record<string, string> = {
+    'download': 'downloading',
+    'audio-processing': 'transcribing', // Map to final audio stage
+    'summarization': 'summarizing',
+  };
+  
+  return stageMapping[stage] || stage;
+}
+
+/**
  * Progress bar configuration
  */
 export interface ProgressConfig {
@@ -193,6 +206,10 @@ export class TaskProgressMonitor {
       this.handleStatusUpdate(data);
     });
 
+    this.sseClient.on('status-change', (data) => {
+      this.handleStatusUpdate(data); // Handle status-change events the same way as status
+    });
+
     this.sseClient.on('complete', (data) => {
       this.handleTaskComplete(data);
     });
@@ -222,8 +239,11 @@ export class TaskProgressMonitor {
     this.lastProgressUpdate = Date.now();
     this.isStuckProgressDetected = false;
 
-    if (stage && typeof stage === 'string' && this.progressBars.has(stage)) {
-      const bar = this.progressBars.get(stage)!;
+    // Map legacy stage IDs to current CLI stage IDs
+    const mappedStage = mapStageId(stage);
+
+    if (mappedStage && typeof mappedStage === 'string' && this.progressBars.has(mappedStage)) {
+      const bar = this.progressBars.get(mappedStage)!;
       bar.update(Math.min(100, Math.max(0, progress)), {
         eta: eta ? formatDuration(eta) : '--',
         speed: this.calculateSpeed(progress),
@@ -237,12 +257,12 @@ export class TaskProgressMonitor {
     }
 
     // Update compact mode display
-    if (!this.multibar && this.config.compact && stage) {
-      this.displayCompactProgress(stage, progress, step);
+    if (!this.multibar && this.config.compact && mappedStage) {
+      this.displayCompactProgress(mappedStage, progress, step);
     }
 
     // Detect stuck progress
-    this.detectStuckProgress(stage, progress);
+    this.detectStuckProgress(mappedStage, progress);
   }
 
   /**
@@ -500,13 +520,22 @@ export class TaskProgressMonitor {
 
   /**
    * Display compact progress (for non-TTY environments)
+   * Improved to reduce console spam with cleaner output
    */
   private displayCompactProgress(stage: string, progress: number, step?: string): void {
-    
     const percentage = Math.round(progress);
     const stageName = PROCESSING_STAGES.find(s => s.id === stage)?.name || stage;
     const stepText = step ? ` - ${colors.dim(step)}` : '';
-    console.log(`${colors.primary('▶')} ${stageName}: ${colors.secondary(`${percentage}%`)}${stepText}`);
+    
+    // Use process.stdout.write with \r for cleaner line overwriting when possible
+    if (process.stdout.isTTY) {
+      process.stdout.write(`\r${colors.primary('▶')} ${stageName}: ${colors.secondary(`${percentage}%`)}${stepText}`);
+    } else {
+      // Only log significant progress changes in non-TTY mode to reduce spam
+      if (percentage % 10 === 0 || percentage === 100) {
+        console.log(`${colors.primary('▶')} ${stageName}: ${colors.secondary(`${percentage}%`)}${stepText}`);
+      }
+    }
   }
 
   /**
