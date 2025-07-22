@@ -102,6 +102,32 @@ export function formatSRTTime(seconds: number): string {
 }
 
 /**
+ * Convert timestamp to seconds from various formats
+ */
+function convertToSeconds(offsetMs?: number, timestamp?: string): number {
+  // Prefer offsets (milliseconds) if available
+  if (typeof offsetMs === 'number') {
+    return offsetMs / 1000;
+  }
+  
+  // Fall back to timestamp parsing (HH:MM:SS,mmm format)
+  if (typeof timestamp === 'string') {
+    const match = timestamp.match(/(\d{2}):(\d{2}):(\d{2}),(\d{3})/);
+    if (match && match.length >= 5) {
+      const h = match[1];
+      const m = match[2];
+      const s = match[3];
+      const ms = match[4];
+      if (h && m && s && ms) {
+        return parseInt(h, 10) * 3600 + parseInt(m, 10) * 60 + parseInt(s, 10) + parseInt(ms, 10) / 1000;
+      }
+    }
+  }
+  
+  return 0;
+}
+
+/**
  * Parse whisper.cpp CLI output
  */
 export function parseWhisperOutput(output: string): TranscriptionResult {
@@ -119,7 +145,48 @@ export function parseWhisperOutput(output: string): TranscriptionResult {
       throw new Error('parseWhisperOutput: invalid JSON structure');
     }
 
-    // Extract with validation
+    // Check for new format with transcription array
+    if (Array.isArray(jsonResult.transcription)) {
+      console.log('🔄 Detected new Whisper-cpp format with transcription array');
+      
+      // Parse new format: {transcription: [{timestamps, offsets, text}, ...]}
+      const segments = jsonResult.transcription
+        .map((item: any, index: number) => {
+          const start = convertToSeconds(item.offsets?.from, item.timestamps?.from);
+          const end = convertToSeconds(item.offsets?.to, item.timestamps?.to);
+          const text = item.text?.trim() || '';
+          
+          // Log first few segments for debugging
+          if (index < 3) {
+            console.log(`New format segment ${index}: start=${start}, end=${end}, text="${text}"`);
+          }
+          
+          return { start, end, text, confidence: item.confidence };
+        })
+        .filter((seg: TranscriptionSegment) => seg.text.length > 0); // Remove empty segments
+      
+      // Aggregate full text from segments
+      const text = segments.map((seg: TranscriptionSegment) => seg.text).join(' ').trim();
+      
+      // Calculate duration from last segment
+      const duration = segments.length > 0 ? segments[segments.length - 1].end : 0;
+      
+      const result: TranscriptionResult = {
+        text,
+        segments,
+        language: jsonResult.result?.language || jsonResult.params?.language || 'auto',
+        duration,
+        modelUsed: jsonResult.model?.type || 'large-v3'
+      };
+      
+      console.log(`✅ New format parsed: ${segments.length} segments, ${text.length} chars, ${duration}s duration`);
+      
+      return result;
+    }
+
+    // Handle legacy format: {text, segments, duration, language}
+    console.log('🔄 Detected legacy Whisper-cpp format');
+    
     const result: TranscriptionResult = {
       text: jsonResult.text || '',
       segments: Array.isArray(jsonResult.segments) ? jsonResult.segments : [],
@@ -140,7 +207,7 @@ export function parseWhisperOutput(output: string): TranscriptionResult {
       
       // Log first few segments for debugging
       if (index < 3) {
-        console.log(`Segment ${index}: start=${seg.start}(${typeof seg.start}) -> ${validStart}, end=${seg.end}(${typeof seg.end}) -> ${validEnd}`);
+        console.log(`Legacy segment ${index}: start=${seg.start}(${typeof seg.start}) -> ${validStart}, end=${seg.end}(${typeof seg.end}) -> ${validEnd}`);
       }
       
       return {
@@ -164,7 +231,7 @@ export function parseWhisperOutput(output: string): TranscriptionResult {
 
     // Log timestamp validation summary
     const hasValidTimestamps = segments.some((seg: TranscriptionSegment) => seg.start > 0 || seg.end > 0);
-    console.log(`Parsed ${segments.length} segments, hasValidTimestamps: ${hasValidTimestamps}`);
+    console.log(`Legacy format parsed: ${segments.length} segments, hasValidTimestamps: ${hasValidTimestamps}`);
 
     return result;
   } catch (jsonError) {

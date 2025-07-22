@@ -166,9 +166,9 @@ export class WhisperCLI {
       // Ensure we have the correct model information
       transcriptionResult.modelUsed = 'large-v3';
 
-      // Critical validation before returning
-      if (!transcriptionResult.text?.trim() || transcriptionResult.segments.length === 0) {
-        console.error('❌ Whisper CLI returned empty transcription!');
+      // Critical validation before returning - only fail if BOTH text and segments are empty
+      if (!transcriptionResult.text?.trim() && transcriptionResult.segments.length === 0) {
+        console.error('❌ Whisper CLI returned completely empty transcription!');
         console.error('Raw whisper stdout:', result.stdout.substring(0, 1000));
         console.error('Raw whisper stderr:', result.stderr.substring(0, 1000));
         console.error('Generated files check:');
@@ -176,7 +176,7 @@ export class WhisperCLI {
         console.error(`  TXT exists: ${existsSync(txtOutputPath)}`);
         
         throw new Error(
-          `Whisper transcription returned empty results. ` +
+          `Whisper transcription returned completely empty results - both text and segments are empty. ` +
           `Text length: ${transcriptionResult.text?.length || 0}, ` +
           `Segments: ${transcriptionResult.segments.length}, ` +
           `Duration: ${transcriptionResult.duration}s`
