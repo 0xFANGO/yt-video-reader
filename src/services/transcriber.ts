@@ -32,6 +32,23 @@ export class TranscriptionError extends Error {
     super(message);
     this.name = 'TranscriptionError';
   }
+
+  // Static factory methods for common errors
+  static emptyResult(details: { textLength: number; segmentsCount: number; duration: number }): TranscriptionError {
+    return new TranscriptionError(
+      'Transcription completed but returned empty results',
+      'EMPTY_TRANSCRIPTION',
+      details
+    );
+  }
+
+  static parseFailure(rawOutput: string): TranscriptionError {
+    return new TranscriptionError(
+      'Failed to parse transcription output',
+      'PARSE_FAILURE',
+      { rawOutputLength: rawOutput.length, preview: rawOutput.substring(0, 200) }
+    );
+  }
 }
 
 /**
@@ -211,6 +228,24 @@ export class Transcriber {
     outputDir: string
   ): Promise<void> {
     try {
+      // Debug logging before validation
+      console.log('📊 Transcription Debug Stats:');
+      console.log(`  Text length: ${transcription.text?.length || 0}`);
+      console.log(`  Segments count: ${transcription.segments?.length || 0}`);
+      console.log(`  Duration: ${transcription.duration || 0}s`);
+      console.log(`  Language: ${transcription.language}`);
+      console.log(`  Model: ${transcription.modelUsed}`);
+      
+      if (!transcription.text?.trim() || transcription.segments.length === 0) {
+        console.error('❌ Empty transcription detected before saving!');
+        console.error('Raw transcription object:', JSON.stringify(transcription, null, 2));
+        throw TranscriptionError.emptyResult({
+          textLength: transcription.text?.length || 0,
+          segmentsCount: transcription.segments?.length || 0,
+          duration: transcription.duration
+        });
+      }
+      
       // Validate and fix timestamp data before saving
       const validatedTranscription = this.validateTimestamps(transcription);
       
@@ -234,7 +269,7 @@ export class Transcriber {
         .join('\n');
       await fs.writeFile(wtsPath, wtsContent);
 
-      console.log('Transcription results saved to:', outputDir);
+      console.log('✅ Transcription results saved to:', outputDir);
     } catch (error) {
       console.error('Failed to save transcription results:', error);
       throw new TranscriptionError(

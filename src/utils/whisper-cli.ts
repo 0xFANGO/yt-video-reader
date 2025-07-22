@@ -95,23 +95,37 @@ export class WhisperCLI {
       '-pp',  // print progress
       '-pc',  // print colors
       '-otxt', // output txt
-      '-osrt', // output srt
+      '-osrt', // output srt  
       '-oj',   // output json - CRITICAL for timestamps
       '-t', '8', // number of threads
     ];
 
-    // Add word timestamps if enabled - ENHANCED for better timestamp extraction
+    // Enhanced word timestamps configuration
     if (config.wordTimestamps) {
-      args.push('-ml', '1'); // max line length for word timestamps
-      args.push('-sow');     // split on word - improves timestamp accuracy
-      args.push('-wt', '0.01'); // word timestamp threshold - more sensitive
+      args.push('-ml', '1');     // max line length for word timestamps
+      args.push('-sow');         // split on word - improves timestamp accuracy  
+      args.push('-wt', '0.01');  // word timestamp threshold
+      // Note: --print-realtime removed as it's not supported by all whisper-cli versions
     }
 
     try {
-      console.log('Executing whisper command:');
-      console.log(`${this.executablePath} ${args.join(' ')}`);
+      console.log('🎯 Whisper Command Execution:');
+      console.log(`  Executable: ${this.executablePath}`);
+      console.log(`  Model: ${this.modelPath}`);
+      console.log(`  Audio file: ${audioPath}`);
+      console.log(`  Output dir: ${outputDir}`);
+      console.log(`  Full command: ${this.executablePath} ${args.join(' ')}`);
       
       const result = await this.runWhisperCommand(args, onProgress, onTextStream);
+      
+      console.log('📤 Whisper Command Results:');
+      console.log(`  Exit code: ${result.exitCode}`);
+      console.log(`  STDOUT length: ${result.stdout.length}`);
+      console.log(`  STDERR length: ${result.stderr.length}`);
+      console.log(`  STDOUT preview: ${result.stdout.substring(0, 300)}...`);
+      if (result.stderr) {
+        console.log(`  STDERR preview: ${result.stderr.substring(0, 300)}...`);
+      }
       
       if (result.exitCode !== 0) {
         console.error('Whisper command failed:');
@@ -126,20 +140,48 @@ export class WhisperCLI {
       
       if (existsSync(jsonOutputPath)) {
         const jsonContent = await fs.readFile(jsonOutputPath, 'utf-8');
-        console.log('Using JSON output for timestamps:', jsonContent.substring(0, 200) + '...');
+        console.log('🔍 JSON output file analysis:');
+        console.log(`  File size: ${jsonContent.length} bytes`);
+        console.log(`  Content preview: ${jsonContent.substring(0, 500)}...`);
+        
         transcriptionResult = parseWhisperOutput(jsonContent);
+        console.log('📊 Parsed JSON result stats:');
+        console.log(`  Text length: ${transcriptionResult.text?.length || 0}`);
+        console.log(`  Segments: ${transcriptionResult.segments?.length || 0}`);
       } else if (existsSync(txtOutputPath)) {
         const textContent = await fs.readFile(txtOutputPath, 'utf-8');
-        console.log('Fallback to text content (no timestamps):', textContent.substring(0, 200) + '...');
+        console.log('🔍 TXT output fallback:');
+        console.log(`  File size: ${textContent.length} bytes`);
+        console.log(`  Content preview: ${textContent.substring(0, 200)}...`);
+        
         transcriptionResult = parseWhisperOutput(textContent);
       } else {
-        // Fallback to stdout if no files are generated
-        console.log('No output files found, using stdout:', result.stdout.substring(0, 200) + '...');
+        console.log('🔍 STDOUT fallback:');
+        console.log(`  Output length: ${result.stdout.length} bytes`);
+        console.log(`  Content preview: ${result.stdout.substring(0, 200)}...`);
+        
         transcriptionResult = parseWhisperOutput(result.stdout);
       }
 
       // Ensure we have the correct model information
       transcriptionResult.modelUsed = 'large-v3';
+
+      // Critical validation before returning
+      if (!transcriptionResult.text?.trim() || transcriptionResult.segments.length === 0) {
+        console.error('❌ Whisper CLI returned empty transcription!');
+        console.error('Raw whisper stdout:', result.stdout.substring(0, 1000));
+        console.error('Raw whisper stderr:', result.stderr.substring(0, 1000));
+        console.error('Generated files check:');
+        console.error(`  JSON exists: ${existsSync(jsonOutputPath)}`);
+        console.error(`  TXT exists: ${existsSync(txtOutputPath)}`);
+        
+        throw new Error(
+          `Whisper transcription returned empty results. ` +
+          `Text length: ${transcriptionResult.text?.length || 0}, ` +
+          `Segments: ${transcriptionResult.segments.length}, ` +
+          `Duration: ${transcriptionResult.duration}s`
+        );
+      }
 
       return transcriptionResult;
     } catch (error) {

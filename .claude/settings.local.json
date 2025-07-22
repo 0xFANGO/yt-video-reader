@@ -28,7 +28,11 @@
       "Bash(redis-cli:*)",
       "WebFetch(domain:docs.bullmq.io)",
       "Bash(npm test:*)",
-      "Bash(node:*)"
+      "Bash(node:*)",
+      "Bash(chmod:*)",
+      "Bash(WHISPER_EXECUTABLE_PATH=/opt/homebrew/bin/whisper-cli WHISPER_MODEL_PATH=/Users/fengge/whisper-models/ggml-large-v3.bin node /Users/fengge/coding/yt-video-reader/scripts/debug-whisper.js /Users/fengge/coding/yt-video-reader/data/task_mddhg6lg_c28l60/vocals.wav)",
+      "Bash(/opt/homebrew/bin/whisper-cli -m /Users/fengge/whisper-models/ggml-large-v3.bin -f /Users/fengge/coding/yt-video-reader/data/task_mddhg6lg_c28l60/vocals.wav -of /tmp/whisper-test -l auto -pp -pc -otxt -osrt -oj -t 8 -ml 1 -sow -wt 0.01)",
+      "Bash(pkill:*)"
     ],
     "deny": []
   }

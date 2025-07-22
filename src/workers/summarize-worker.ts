@@ -88,9 +88,19 @@ export class SummarizeWorker {
         throw new Error('Failed to load transcription result');
       }
 
-      // Validate transcription content
-      if (!transcriptionData.text || transcriptionData.text.trim().length === 0) {
-        throw new Error('Transcription text is empty');
+      // Validate transcription before processing
+      if (!transcriptionData.text?.trim() || transcriptionData.segments.length === 0) {
+        console.error(`❌ Task ${taskId}: Empty transcription detected in summarization stage`);
+        console.error('Transcription stats:', {
+          textLength: transcriptionData.text?.length || 0,
+          segmentsCount: transcriptionData.segments?.length || 0,
+          duration: transcriptionData.duration
+        });
+        
+        throw new Error(
+          'Cannot generate summary: transcription is empty. ' +
+          'This indicates a failure in the audio transcription stage.'
+        );
       }
 
       // Update job progress
@@ -244,6 +254,41 @@ export class SummarizeWorker {
       console.error(`Flow summarization failed for task ${taskId}:`, error);
 
       const errorMessage = error instanceof Error ? error.message : String(error);
+      
+      // Enhanced error reporting for empty transcription
+      if (error instanceof Error && error.message.includes('transcription is empty')) {
+        console.error(`❌ Task ${taskId}: Transcription validation failed`);
+        
+        // Mark task as failed with specific error
+        const stageResult: FlowStageResult = {
+          taskId,
+          stage: 'summarizing',
+          success: false,
+          error: 'EMPTY_TRANSCRIPTION',
+          files: {},
+          metadata: {
+            summarizationFailedAt: new Date().toISOString(),
+            failureReason: 'Empty transcription - likely audio processing issue',
+            errorDetails: error.message,
+            errorMessage: 'Transcription stage produced empty results',
+            processingTime,
+          },
+        };
+        
+        // Update task manifest with empty transcription error
+        await this.updateTaskManifest(taskId, {
+          status: 'failed',
+          error: 'EMPTY_TRANSCRIPTION',
+        });
+
+        // Notify stage orchestrator of failure
+        await stageOrchestrator.handleStageFailure(taskId, 'summarizing', 'Empty transcription detected', job);
+
+        // Update flow with failure
+        await videoProcessingFlowProducer.failFlow(taskId, 'Empty transcription detected');
+
+        throw error;
+      }
       
       // Create failure result
       const stageResult: FlowStageResult = {

@@ -105,12 +105,31 @@ export function formatSRTTime(seconds: number): string {
  * Parse whisper.cpp CLI output
  */
 export function parseWhisperOutput(output: string): TranscriptionResult {
-  // Parse JSON output from whisper.cpp
+  // Input validation
+  if (!output || output.trim().length === 0) {
+    throw new Error('parseWhisperOutput: empty or null input');
+  }
+
   try {
-    const jsonOutput = JSON.parse(output);
+    // First try to parse as JSON (from whisper --output-json)
+    const jsonResult = JSON.parse(output);
     
+    // Validate JSON structure
+    if (typeof jsonResult !== 'object' || jsonResult === null) {
+      throw new Error('parseWhisperOutput: invalid JSON structure');
+    }
+
+    // Extract with validation
+    const result: TranscriptionResult = {
+      text: jsonResult.text || '',
+      segments: Array.isArray(jsonResult.segments) ? jsonResult.segments : [],
+      language: jsonResult.language || 'auto',
+      duration: typeof jsonResult.duration === 'number' ? jsonResult.duration : 0,
+      modelUsed: jsonResult.model || 'large-v3'
+    };
+
     // Enhanced timestamp parsing with proper number conversion
-    const segments = jsonOutput.segments?.map((seg: any, index: number) => {
+    const segments = result.segments.map((seg: any, index: number) => {
       // Convert to numbers, handling various input types
       const start = seg.start !== undefined && seg.start !== null ? Number(seg.start) : 0;
       const end = seg.end !== undefined && seg.end !== null ? Number(seg.end) : 0;
@@ -130,33 +149,45 @@ export function parseWhisperOutput(output: string): TranscriptionResult {
         text: seg.text || '',
         confidence: seg.confidence,
       };
-    }) || [];
-    
+    });
+
+    result.segments = segments;
+
+    // Critical validation - if duration is 0 but segments exist, recalculate
+    if (result.duration === 0 && result.segments.length > 0) {
+      const lastSegment = result.segments[result.segments.length - 1];
+      if (lastSegment && lastSegment.end > 0) {
+        result.duration = lastSegment.end;
+        console.warn('⚠️ Fixed duration from segments:', result.duration);
+      }
+    }
+
     // Log timestamp validation summary
     const hasValidTimestamps = segments.some((seg: TranscriptionSegment) => seg.start > 0 || seg.end > 0);
     console.log(`Parsed ${segments.length} segments, hasValidTimestamps: ${hasValidTimestamps}`);
+
+    return result;
+  } catch (jsonError) {
+    console.log('📝 JSON parsing failed, trying plain text parsing...');
     
-    return {
-      text: jsonOutput.text || '',
-      segments,
-      language: jsonOutput.language || 'auto',
-      duration: Number(jsonOutput.duration) || 0,
-      modelUsed: 'large-v3',
-    };
-  } catch (error) {
-    console.log('JSON parsing failed, using plain text fallback:', error);
-    // Fallback: parse plain text output
-    return {
+    // Fallback to plain text parsing
+    const textResult: TranscriptionResult = {
       text: output.trim(),
-      segments: [{
-        start: 0,
-        end: 0,
-        text: output.trim(),
-      }],
+      segments: [], // Plain text has no segment info
       language: 'auto',
-      duration: 0,
-      modelUsed: 'large-v3',
+      duration: 0, // Unknown from plain text
+      modelUsed: 'large-v3'
     };
+
+    // Validate plain text result
+    if (!textResult.text || textResult.text.trim().length === 0) {
+      throw new Error(
+        'parseWhisperOutput: failed to extract any text content. ' +
+        `Input length: ${output.length}, preview: ${output.substring(0, 100)}`
+      );
+    }
+
+    return textResult;
   }
 }
 
